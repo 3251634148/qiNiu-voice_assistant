@@ -1,0 +1,35 @@
+{
+  "name": "voice-assistant",
+  "version": "1.0.0",
+  "description": "AI-powered voice assistant for computer control",
+  "main": "backend/server.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "start": "cd backend && npm start",
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint:biome": "biome lint .",
+    "lint:biome:fix": "biome lint --write .",
+    "check": "biome check .",
+    "check:fix": "biome check --write ."
+  },
+  "keywords": [
+    "voice-assistant",
+    "ai",
+    "computer-control",
+    "electron"
+  ],
+  "author": "Voice Assistant Team",
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "2.2.2",
+    "concurrently": "^8.2.2"
+  },
+  "dependencies": {
+    "form-data": "^4.0.4"
+  }
+}

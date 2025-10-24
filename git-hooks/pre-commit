@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# Pre-commit hook for Biome format and lint checks
+# This script runs Biome checks only on staged files
+
+set -e
+
+echo "🔍 Running pre-commit checks..."
+
+# Check if biome is available
+if ! command -v npx &> /dev/null; then
+    echo "❌ npx not found. Please install Node.js and npm."
+    exit 1
+fi
+
+# Check if biome.json exists
+if [ ! -f "biome.json" ]; then
+    echo "❌ biome.json not found. Please ensure Biome is configured."
+    exit 1
+fi
+
+echo ""
+echo "🎨 Running Biome formatter check..."
+
+# Format staged files
+if ! npx @biomejs/biome format --staged --no-errors-on-unmatched; then
+    echo ""
+    echo "❌ Formatting issues found!"
+    echo "💡 Run the following command to fix formatting:"
+    echo "   npx @biomejs/biome format --staged --write"
+    echo ""
+    exit 1
+fi
+
+echo "✅ Formatting check passed"
+
+echo ""
+echo "🔍 Running Biome linter check..."
+
+# Run linter check on staged JS/TS files
+if ! git diff --name-only --staged | grep -E "\.(js|jsx|ts|tsx|json)$" | xargs npx @biomejs/biome lint --no-errors-on-unmatched; then
+    echo ""
+    echo "❌ Linting issues found!"
+    echo "💡 Run the following command to fix linting issues:"
+    echo "   npx @biomejs/biome check --write --no-errors-on-unmatched ."
+    echo ""
+    echo "💡 For unsafe fixes (use with caution):"
+    echo "   npx @biomejs/biome check --write --unsafe --no-errors-on-unmatched ."
+    echo ""
+    exit 1
+fi
+
+echo "✅ Linting check passed"
+
+echo ""
+echo "🎉 All pre-commit checks passed! Ready to commit."

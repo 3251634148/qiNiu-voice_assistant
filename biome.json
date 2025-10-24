@@ -1,0 +1,85 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.2.2/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "**",
+      "!**/__mock__/**/*",
+      "!**/__tests__/**/*.mock.ts",
+      "!**/__tests__/**/*.expect.ts",
+      "!**/*.log",
+      "!**/npm-debug.log*",
+      "!**/yarn-debug.log*",
+      "!**/yarn-error.log*",
+      "!**/*.pid",
+      "!**/*.seed",
+      "!**/*.pid.lock",
+      "!**/lib-cov",
+      "!**/coverage",
+      "!**/.nyc_output",
+      "!**/.grunt",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/build",
+      "!**/.next",
+      "!**/out",
+      "!**/.cache",
+      "!**/.temp",
+      "!**/.tmp",
+      "!**/temp",
+      "!**/tmp",
+      "!**/*.min.js",
+      "!**/*.min.css",
+      "!**/*.bundle.js",
+      "!**/*.bundle.css",
+      "!**/package-lock.json",
+      "!**/pnpm-lock.yaml",
+      "!**/yarn.lock",
+      "!**/.git",
+      "!**/.svn",
+      "!**/.hg",
+      "!**/.DS_Store",
+      "!**/Thumbs.db",
+      "!**/*.tsbuildinfo",
+      "!**/.eslintcache",
+      "!**/.vscode",
+      "!**/.idea"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "lineEnding": "lf"
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "jsxQuoteStyle": "double",
+      "quoteProperties": "asNeeded",
+      "trailingCommas": "es5",
+      "semicolons": "always",
+      "arrowParentheses": "always",
+      "bracketSpacing": true,
+      "bracketSameLine": false
+    }
+  },
+  "json": {
+    "formatter": {
+      "trailingCommas": "none"
+    }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  }
+}

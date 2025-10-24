@@ -1,0 +1,38 @@
+{
+  "name": "voice-assistant-electron",
+  "version": "1.0.0",
+  "description": "智能语音助手 - Electron应用",
+  "main": "frontend/public/electron.js",
+  "scripts": {
+    "electron": "cd frontend && npm run electron",
+    "electron:dev": "cd frontend && npm run electron:dev",
+    "electron:build": "cd frontend && npm run electron:build",
+    "build:all": "npm run build && npm run electron:build"
+  },
+  "build": {
+    "appId": "com.voiceassistant.app",
+    "productName": "智能语音助手",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "frontend/dist/**/*",
+      "frontend/public/electron.js",
+      "backend/**/*",
+      "node_modules/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  },
+  "keywords": ["voice", "assistant", "ai", "electron"],
+  "author": "Voice Assistant Team",
+  "license": "MIT"
+}
