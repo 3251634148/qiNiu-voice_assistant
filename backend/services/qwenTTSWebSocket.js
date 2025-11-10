@@ -220,7 +220,7 @@ class QwenTTSWebSocket {
       throw new Error("WebSocket连接未建立");
     }
 
-    const { voice = "zhizhe_emo", rate = 1.0, pitch = 1.0 } = settings;
+    const { voice = "zhizhe_emo", rate = 1.0, pitch = 1.0, model } = settings;
 
     // 生成唯一的task_id
     const taskId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -233,7 +233,7 @@ class QwenTTSWebSocket {
         streaming: "out",
       },
       payload: {
-        model: "sambert-zhichu-v1",
+        model: model || "sambert-zhichu-v1",
         task_group: "audio",
         task: "tts",
         function: "SpeechSynthesizer",
@@ -324,7 +324,7 @@ class QwenTTSWebSocket {
   }
 
   /**
-   * 非流式语音合成 - 修复版本
+   * 非流式语音合成
    */
   async synthesize(text, settings = {}) {
     try {

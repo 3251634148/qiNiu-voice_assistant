@@ -8,8 +8,12 @@ interface VoiceInputProps {
 }
 
 export function VoiceInput({ disabled = false }: VoiceInputProps) {
-  const { sendTextCommand, sendVoiceInput } = useSocket();
-  const { isRecording, toggleRecording } = useVoice(sendTextCommand, sendVoiceInput);
+  const { sendTextCommand, sendVoiceInput, cancel, stopSpeaking } = useSocket();
+  const { isRecording, toggleRecording } = useVoice(async (text) => {
+    await cancel(true);
+    await stopSpeaking();
+    sendTextCommand(text);
+  }, sendVoiceInput);
   const [textInput, setTextInput] = React.useState("");
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
@@ -19,6 +23,8 @@ export function VoiceInput({ disabled = false }: VoiceInputProps) {
 
     setIsSubmitting(true);
     try {
+      await cancel(true);
+      await stopSpeaking();
       sendTextCommand(textInput);
       setTextInput("");
     } catch (error) {
@@ -30,6 +36,10 @@ export function VoiceInput({ disabled = false }: VoiceInputProps) {
 
   const handleVoiceToggle = async () => {
     try {
+      if (!isRecording) {
+        await cancel(true);
+        await stopSpeaking();
+      }
       await toggleRecording();
     } catch (error) {
       console.error("语音录制失败:", error);

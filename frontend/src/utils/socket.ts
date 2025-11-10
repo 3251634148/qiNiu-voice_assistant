@@ -9,6 +9,7 @@ class SocketService {
 
   constructor(serverUrl: string = "http://localhost:3001") {
     this.serverUrl = serverUrl;
+    (window as any).socketService = this;
   }
 
   connect(): Promise<void> {
@@ -115,12 +116,18 @@ class SocketService {
     this.socket.emit("confirm-action", { confirmationId, approved });
   }
 
-  // 取消操作
-  cancel() {
+  cancel(silent?: boolean) {
     if (!this.socket) {
       throw new Error("未连接到服务器");
     }
-    this.socket.emit("cancel");
+    this.socket.emit("cancel", { silent: !!silent });
+  }
+
+  clearSession() {
+    if (!this.socket) {
+      throw new Error("未连接到服务器");
+    }
+    this.socket.emit("clear-session");
   }
 
   // 获取会话状态

@@ -118,6 +118,5 @@ audio-cache/
 out/
 release/
 
-# Test output
-test-results/
-junit.xml
+# Agent doc
+AGENTS.md

@@ -23,7 +23,6 @@ npm run install:all
 3. **配置环境变量**
 ```bash
 cd backend
-cp .env.example .env
 # 编辑 .env 文件，填入你的 API 密钥
 ```
 

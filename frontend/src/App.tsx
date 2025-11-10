@@ -29,7 +29,7 @@ function AppContent() {
   };
 
   const handleCancel = () => {
-    cancel();
+    cancel(true);
   };
 
   return (

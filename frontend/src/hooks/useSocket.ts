@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { getSettings } from "../components/SettingsModal";
 import type { ActionResult, ConfirmationRequest, Message, ToolResult } from "../types";
 import type SocketService from "../utils/socket";
@@ -51,7 +51,7 @@ export function useSocket() {
         });
 
         socket.onAudioResponse((data) => {
-          // 播放语音响应，传递文本给Web Speech API
+          if (stopAllRef.current) return;
           playAudioResponse(data.audioData, data.text);
         });
 
@@ -158,49 +158,28 @@ export function useSocket() {
       socketRef.current = null;
       connectionAttemptRef.current = false;
     };
-  }, [
-    addMessage,
-    confirmAction, // 播放语音响应，传递文本给Web Speech API
-    playAudioResponse, // 实时播放音频流块
-    playAudioStreamChunk,
-    setConnectionState,
-    setSessionState,
-    setVoiceState,
-  ]);
+  }, []);
 
-  // 音频上下文缓存，避免重复创建
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<ArrayBuffer[]>([]);
   const isPlayingRef = useRef(false);
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const stopAllRef = useRef(false);
 
   // 获取或创建音频上下文
-  const getAudioContext = () => {
+  const getAudioContext = useCallback(() => {
     if (!audioContextRef.current) {
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
     return audioContextRef.current;
-  };
+  }, []);
 
-  // 播放音频流块（实时流式播放）
-  const playAudioStreamChunk = async (audioData: ArrayBuffer, _text?: string) => {
-    try {
-      if (!audioData || audioData.byteLength === 0) return;
-
-      // 将音频数据加入队列
-      audioQueueRef.current.push(audioData);
-
-      // 如果当前没有在播放，开始播放队列
-      if (!isPlayingRef.current) {
-        processAudioQueue();
-      }
-    } catch (error) {
-      console.error("播放音频流块失败:", error);
-    }
-  };
-
-  // 处理音频播放队列
-  const processAudioQueue = async () => {
+  const processAudioQueue = useCallback(async () => {
     if (isPlayingRef.current || audioQueueRef.current.length === 0) {
+      return;
+    }
+    if (stopAllRef.current) {
+      audioQueueRef.current.length = 0;
       return;
     }
 
@@ -210,25 +189,27 @@ export function useSocket() {
     try {
       const audioContext = getAudioContext();
 
-      while (audioQueueRef.current.length > 0) {
+      while (audioQueueRef.current.length > 0 && !stopAllRef.current) {
         const audioData = audioQueueRef.current.shift();
         if (!audioData) continue;
 
         try {
-          // 解码音频数据
           const audioBuffer = await audioContext.decodeAudioData(audioData.slice(0));
-
-          // 创建音频源
           const source = audioContext.createBufferSource();
+          currentSourceRef.current = source;
           source.buffer = audioBuffer;
           source.connect(audioContext.destination);
-
-          // 等待当前音频播放完成
           await new Promise<void>((resolve) => {
             source.onended = () => {
+              if (currentSourceRef.current === source) currentSourceRef.current = null;
               resolve();
             };
-            source.start();
+            if (stopAllRef.current) {
+              try { source.stop(0); } catch {}
+              resolve();
+            } else {
+              source.start();
+            }
           });
         } catch (decodeError) {
           console.error("解码音频数据失败:", decodeError);
@@ -239,96 +220,86 @@ export function useSocket() {
     } finally {
       isPlayingRef.current = false;
       setVoiceState({ isSpeaking: false });
-
-      // 如果队列中还有数据，继续处理
-      if (audioQueueRef.current.length > 0) {
-        setTimeout(() => processAudioQueue(), 50); // 稍微延迟，避免重叠
+      if (audioQueueRef.current.length > 0 && !stopAllRef.current) {
+        setTimeout(() => processAudioQueue(), 50);
       }
     }
-  };
+  }, [getAudioContext, setVoiceState]);
 
-  const playAudioResponse = async (audioData: ArrayBuffer, text?: string) => {
+  // 播放音频流块（实时流式播放）
+  const playAudioStreamChunk = useCallback(async (audioData: ArrayBuffer, _text?: string) => {
+    try {
+      if (!audioData || audioData.byteLength === 0) return;
+      audioQueueRef.current.push(audioData);
+      if (!isPlayingRef.current) {
+        processAudioQueue();
+      }
+    } catch (error) {
+      console.error("播放音频流块失败:", error);
+    }
+  }, [processAudioQueue]);
+
+  const playAudioResponse = useCallback(async (audioData: ArrayBuffer, text?: string) => {
     try {
       setVoiceState({ isSpeaking: true });
-
-      // 优先使用后端返回的音频数据
       if (audioData && audioData.byteLength > 0) {
-        console.log(`播放后端返回的音频数据，长度: ${audioData.byteLength} bytes`);
-        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const audioContext = getAudioContext();
         const audioBuffer = await audioContext.decodeAudioData(audioData.slice(0));
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(audioContext.destination);
-
         source.onended = () => {
           setVoiceState({ isSpeaking: false });
         };
-
         source.start();
         return;
       }
-
-      // 如果没有音频数据，尝试使用Web Speech API进行语音合成
       if (text && "speechSynthesis" in window) {
-        console.log("使用Web Speech API进行语音合成");
         const settings = getSettings();
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.lang = "zh-CN";
         utterance.rate = settings.voiceRate;
         utterance.pitch = settings.voicePitch;
         utterance.volume = 1.0;
-
-        // 设置语音音色
         const voices = window.speechSynthesis.getVoices();
         const preferredVoice = voices.find(
-          (voice) =>
-            voice.lang.includes("zh") &&
-            voice.name.includes(settings.voiceGender === "female" ? "Female" : "Male")
+          (voice) => voice.lang.includes("zh") && voice.name.includes(settings.voiceGender === "female" ? "Female" : "Male")
         );
         if (preferredVoice) {
           utterance.voice = preferredVoice;
         }
-
         utterance.onend = () => {
           setVoiceState({ isSpeaking: false });
         };
-
-        utterance.onerror = (event) => {
-          console.error("语音合成失败:", event);
+        utterance.onerror = () => {
           setVoiceState({ isSpeaking: false });
         };
-
         window.speechSynthesis.speak(utterance);
         return;
       }
-
-      // 如果都没有，直接设置状态
-      console.log("没有音频数据或文本，无法播放");
       setVoiceState({ isSpeaking: false });
     } catch (error) {
       console.error("播放音频失败:", error);
       setVoiceState({ isSpeaking: false });
     }
-  };
+  }, [getAudioContext, setVoiceState]);
 
-  const sendVoiceInput = (audioData: ArrayBuffer, language?: string) => {
+  const sendVoiceInput = useCallback((audioData: ArrayBuffer, language?: string) => {
     if (socketRef.current) {
       socketRef.current.sendVoiceInput(audioData, language);
     }
-  };
+  }, []);
 
-  const sendTextCommand = (text: string) => {
+  const sendTextCommand = useCallback((text: string) => {
     if (socketRef.current) {
-      // 添加用户消息到历史记录
       addMessage("user", text);
       socketRef.current.sendTextCommand(text);
     }
-  };
+  }, [addMessage]);
 
-  const confirmAction = (confirmationId: string, approved: boolean) => {
+  const confirmAction = useCallback((confirmationId: string, approved: boolean) => {
     if (socketRef.current) {
       socketRef.current.confirmAction(confirmationId, approved);
-      // 清除确认状态
       setSessionState({
         hasPendingConfirmation: false,
         hasPendingToolCall: false,
@@ -336,12 +307,11 @@ export function useSocket() {
         confirmationRequest: undefined,
       });
     }
-  };
+  }, [setSessionState]);
 
-  const cancel = () => {
+  const cancel = useCallback((silent: boolean = false) => {
     if (socketRef.current) {
-      socketRef.current.cancel();
-      // 清除确认状态
+      socketRef.current.cancel(silent);
       setSessionState({
         hasPendingConfirmation: false,
         hasPendingToolCall: false,
@@ -349,43 +319,44 @@ export function useSocket() {
         confirmationRequest: undefined,
       });
     }
-  };
+  }, [setSessionState]);
 
-  const getSystemInfo = () => {
-    if (socketRef.current) {
-      socketRef.current.getSystemInfo();
-    }
-  };
+  const getSystemInfo = useCallback(() => {
+    socketRef.current?.getSystemInfo();
+  }, []);
 
-  const getSessionStatus = () => {
-    if (socketRef.current) {
-      socketRef.current.getSessionStatus();
-    }
-  };
+  const getSessionStatus = useCallback(() => {
+    socketRef.current?.getSessionStatus();
+  }, []);
 
-  const getSessionHistory = (limit?: number) => {
-    if (socketRef.current) {
-      socketRef.current.getSessionHistory(limit);
-    }
-  };
+  const getSessionHistory = useCallback((limit?: number) => {
+    socketRef.current?.getSessionHistory(limit);
+  }, []);
 
-  const updateTTSSettings = (settings: any) => {
-    if (socketRef.current) {
-      socketRef.current.updateTTSSettings(settings);
-    }
-  };
+  const updateTTSSettings = useCallback((settings: any) => {
+    socketRef.current?.updateTTSSettings(settings);
+  }, []);
 
-  const getTTSSettings = () => {
-    if (socketRef.current) {
-      socketRef.current.getTTSSettings();
-    }
-  };
+  const getTTSSettings = useCallback(() => {
+    socketRef.current?.getTTSSettings();
+  }, []);
 
-  const getAvailableVoices = () => {
-    if (socketRef.current) {
-      socketRef.current.getAvailableVoices();
-    }
-  };
+  const getAvailableVoices = useCallback(() => {
+    socketRef.current?.getAvailableVoices();
+  }, []);
+  const stopSpeaking = useCallback(() => {
+    try {
+      audioQueueRef.current.length = 0;
+      if (audioContextRef.current?.state === "running") {
+        audioContextRef.current.close().catch(() => undefined);
+        audioContextRef.current = null as any;
+      }
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+      setVoiceState({ isSpeaking: false });
+    } catch {}
+  }, [setVoiceState]);
 
   return {
     isInitialized,
@@ -399,5 +370,6 @@ export function useSocket() {
     updateTTSSettings,
     getTTSSettings,
     getAvailableVoices,
+    stopSpeaking,
   };
 }

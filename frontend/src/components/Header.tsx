@@ -1,4 +1,4 @@
-import { RefreshCw, Settings, Trash2, Wifi, WifiOff } from "lucide-react";
+import { RefreshCw, Settings, Trash2, Wifi, WifiOff, Square } from "lucide-react";
 import { useState } from "react";
 import { useApp } from "../hooks/useApp";
 import { useSocket } from "../hooks/useSocket";
@@ -6,7 +6,7 @@ import { SettingsModal } from "./SettingsModal";
 
 export function Header() {
   const { state, clearMessages } = useApp();
-  const { getSystemInfo } = useSocket();
+  const { getSystemInfo, cancel, stopSpeaking, clearSession, getSessionHistory } = useSocket() as any;
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const handleClearMessages = () => {
@@ -25,8 +25,19 @@ export function Header() {
     setIsSettingsOpen(false);
   };
 
+  const handleStopAll = async () => {
+    await cancel(true);
+    await stopSpeaking();
+  };
+
+  const handleNewSession = () => {
+    clearSession();
+    clearMessages();
+    setTimeout(() => getSessionHistory(50), 200);
+  };
+
   return (
-    <header className="bg-white border-b border-gray-200 px-4 py-3">
+    <header className="sticky top-0 z-50 bg-white/90 backdrop-blur border-b border-gray-200 px-4 py-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-bold text-gray-900">智能语音助手</h1>
@@ -67,7 +78,17 @@ export function Header() {
             )}
           </div>
 
-          {/* 操作按钮 */}
+          {/* 停止按钮 */}
+          <button
+            type="button"
+            onClick={handleStopAll}
+            className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+            title="停止"
+          >
+            <Square size={18} />
+          </button>
+
+          {/* 设置 */}
           <button
             type="button"
             onClick={handleOpenSettings}
@@ -77,6 +98,7 @@ export function Header() {
             <Settings size={18} />
           </button>
 
+          {/* 刷新系统信息 */}
           <button
             type="button"
             onClick={handleRefreshSystem}
@@ -86,6 +108,17 @@ export function Header() {
             <RefreshCw size={18} />
           </button>
 
+          {/* 新建对话 */}
+          <button
+            type="button"
+            onClick={handleNewSession}
+            className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+            title="新建对话"
+          >
+            新建
+          </button>
+
+          {/* 清空对话 */}
           <button
             type="button"
             onClick={handleClearMessages}

@@ -134,7 +134,18 @@ class SafetyService {
     try {
       const { name, arguments: args } = toolCall;
 
-      logger.info(`安全校验工具调用: ${name}`, { args });
+      logger.info(`安全校验工具调用: ${name}`, { args, context });
+
+      if (context && context.allowLocalControl === false) {
+        if (name === "write_file" || name === "open_app") {
+          return {
+            allowed: false,
+            riskLevel: "high",
+            reason: "本地应用操控已被关闭",
+            requiresConfirmation: false,
+          };
+        }
+      }
 
       // 基础参数校验
       const basicValidation = this.validateBasicParameters(name, args);

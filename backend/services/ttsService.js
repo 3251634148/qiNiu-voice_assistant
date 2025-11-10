@@ -31,26 +31,23 @@ class TTSService {
         return Buffer.from("");
       }
 
-      // 映射语音设置
       const settings = {
-        voice: this.mapVoiceFromGender(voiceSettings.gender || "female"),
+        voice: voiceSettings.voice || this.mapVoiceFromGender(voiceSettings.gender || "female"),
         rate: voiceSettings.rate || 1.0,
         pitch: voiceSettings.pitch || 1.0,
+        model: voiceSettings.model || undefined,
       };
 
       logger.info(`使用千问TTS进行语音合成: ${text.substring(0, 50)}...`);
 
       if (onAudioChunk) {
-        // 流式合成
         const result = await this.qwenTTS.streamSynthesize(text, settings, onAudioChunk);
         return result.fullAudio;
       } else {
-        // 非流式合成
         return await this.qwenTTS.synthesize(text, settings);
       }
     } catch (error) {
       logger.error("千问TTS语音合成失败:", error);
-      // 返回空音频而不是抛出错误，保证系统稳定性
       logger.info("返回空音频，前端将使用Web Speech API");
       return Buffer.from("");
     }
@@ -70,9 +67,10 @@ class TTSService {
       }
 
       const settings = {
-        voice: this.mapVoiceFromGender(voiceSettings.gender || "female"),
+        voice: voiceSettings.voice || this.mapVoiceFromGender(voiceSettings.gender || "female"),
         rate: voiceSettings.rate || 1.0,
         pitch: voiceSettings.pitch || 1.0,
+        model: voiceSettings.model || undefined,
       };
 
       return await this.qwenTTS.streamSynthesize(text, settings, onAudioChunk);

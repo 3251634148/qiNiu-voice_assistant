@@ -95,10 +95,10 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 取消操作
-  socket.on("cancel", async () => {
+  socket.on("cancel", async (data) => {
     try {
-      await conversationController.handleCancel(socket.id);
+      const silent = !!(data?.silent);
+      await conversationController.handleCancel(socket.id, silent);
     } catch (error) {
       logger.error("处理取消失败:", error);
       socket.emit("error", { message: error.message });
@@ -124,6 +124,19 @@ io.on("connection", (socket) => {
       socket.emit("session-history", history);
     } catch (error) {
       logger.error("获取会话历史失败:", error);
+      socket.emit("error", { message: error.message });
+    }
+  });
+
+  // 清理会话
+  socket.on("clear-session", () => {
+    try {
+      conversationController.clearSession(socket.id);
+      socket.emit("session-history", []);
+      const status = conversationController.getSessionStatus(socket.id);
+      socket.emit("session-status", status);
+    } catch (error) {
+      logger.error("清理会话失败:", error);
       socket.emit("error", { message: error.message });
     }
   });

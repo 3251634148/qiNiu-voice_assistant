@@ -312,7 +312,10 @@ class ConversationController {
         };
 
         // 安全校验
-        const safetyCheck = await this.safetyService.validateToolCall(parsedToolCall);
+        const session = this.sessionStore.getOrCreateSession(socketId);
+        const safetyCheck = await this.safetyService.validateToolCall(parsedToolCall, {
+          allowLocalControl: session.allowLocalControl ?? session.ttsSettings?.allowLocalControl ?? true,
+        });
 
         if (!safetyCheck.allowed) {
           logger.warn(`工具调用被安全检查阻止: ${socketId}`, {
@@ -411,9 +414,11 @@ class ConversationController {
       });
 
       // 执行工具
+      const session = this.sessionStore.getOrCreateSession(socketId);
       const result = await this.toolRouter.routeAndExecute(toolCall, {
         socketId: socketId,
-        session: this.sessionStore.getOrCreateSession(socketId),
+        session,
+        allowLocalControl: session.allowLocalControl ?? session.ttsSettings?.allowLocalControl ?? true,
       });
 
       // 添加工具结果到会话
@@ -558,20 +563,18 @@ class ConversationController {
   }
 
   // 处理用户取消
-  async handleCancel(socketId) {
+  async handleCancel(socketId, silent = false) {
     try {
-      logger.info(`处理用户取消: ${socketId}`);
+      logger.info(`处理用户取消: ${socketId}`, { silent });
 
       const _session = this.sessionStore.getOrCreateSession(socketId);
 
-      // 清除所有待处理状态
       this.sessionStore.clearPendingConfirmation(socketId);
       this.sessionStore.clearPendingToolCall(socketId);
       this.sessionStore.markCanceled(socketId, "user_canceled");
 
-      // 发送取消确认
       const socket = this.getSocketById(socketId);
-      if (socket) {
+      if (socket && !silent) {
         socket.emit("assistant-message", {
           type: "canceled",
           content: "当前操作已取消",
@@ -623,9 +626,12 @@ class ConversationController {
         gender: settings.gender || "female",
         rate: parseFloat(settings.rate) || 1.0,
         pitch: parseFloat(settings.pitch) || 1.0,
+        model: settings.model || session.ttsSettings?.model,
+        allowLocalControl: settings.allowLocalControl ?? (session.ttsSettings?.allowLocalControl ?? true),
       };
-
-      // 验证设置范围
+      if (typeof settings.allowLocalControl === "boolean") {
+        session.allowLocalControl = settings.allowLocalControl;
+      }
       session.ttsSettings.rate = Math.max(0.5, Math.min(2.0, session.ttsSettings.rate));
       session.ttsSettings.pitch = Math.max(0.5, Math.min(2.0, session.ttsSettings.pitch));
 
@@ -655,6 +661,7 @@ class ConversationController {
           gender: "female",
           rate: 1.0,
           pitch: 1.0,
+          model: undefined,
         },
       };
     } catch (error) {
