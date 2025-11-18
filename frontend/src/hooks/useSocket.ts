@@ -199,18 +199,30 @@ export function useSocket() {
           currentSourceRef.current = source;
           source.buffer = audioBuffer;
           source.connect(audioContext.destination);
+          
           await new Promise<void>((resolve) => {
             source.onended = () => {
               if (currentSourceRef.current === source) currentSourceRef.current = null;
               resolve();
             };
-            if (stopAllRef.current) {
-              try { source.stop(0); } catch {}
-              resolve();
-            } else {
-              source.start();
-            }
+            source.start();
           });
+          
+          // 在每次播放开始后检查是否需要停止
+          if (stopAllRef.current) {
+            console.log("播放期间收到停止信号");
+            if (currentSourceRef.current) {
+              try {
+                currentSourceRef.current.stop();
+              } catch (error) {
+                // 忽略Already stopped错误
+              }
+              currentSourceRef.current = null;
+            }
+            // 清空队列
+            audioQueueRef.current.length = 0;
+            break;
+          }
         } catch (decodeError) {
           console.error("解码音频数据失败:", decodeError);
         }
@@ -229,6 +241,12 @@ export function useSocket() {
   // 播放音频流块（实时流式播放）
   const playAudioStreamChunk = useCallback(async (audioData: ArrayBuffer, _text?: string) => {
     try {
+      // 如果正在停止，不接收新的音频块
+      if (stopAllRef.current) {
+        console.log("正在停止，忽略新的音频块");
+        return;
+      }
+      
       if (!audioData || audioData.byteLength === 0) return;
       audioQueueRef.current.push(audioData);
       if (!isPlayingRef.current) {
@@ -345,17 +363,65 @@ export function useSocket() {
     socketRef.current?.getAvailableVoices();
   }, []);
   const stopSpeaking = useCallback(() => {
+    console.log("执行 stopSpeaking 操作");
     try {
+      // 设置停止标记，阻止后续播放
+      stopAllRef.current = true;
+      
+      // 清空音频队列
       audioQueueRef.current.length = 0;
-      if (audioContextRef.current?.state === "running") {
-        audioContextRef.current.close().catch(() => undefined);
-        audioContextRef.current = null as any;
+      console.log("已清空音频队列");
+      
+      // 强制停止当前播放的音频源
+      if (currentSourceRef.current) {
+        console.log("尝试停止当前音频源");
+        try {
+          // 使用立即停止的方式
+          currentSourceRef.current.stop(0);
+          console.log("已停止音频源");
+        } catch (error) {
+          // 忽略Already stopped错误
+          console.log("音频源停止错误:", error.message);
+        }
+        currentSourceRef.current = null;
       }
+      
+      // 关闭整个音频上下文
+      if (audioContextRef.current && audioContextRef.current.state === "running") {
+        console.log("关闭音频上下文");
+        try {
+          // 不等待close操作完成，直接置空
+          audioContextRef.current.close();
+        } catch (error) {
+          console.log("关闭音频上下文错误:", error);
+        }
+        audioContextRef.current = null;
+        console.log("音频上下文已置空");
+      }
+      
+      // 停止Web Speech API
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        console.log("停止Web Speech API");
         window.speechSynthesis.cancel();
       }
+      
+      // 重置播放状态
+      isPlayingRef.current = false;
       setVoiceState({ isSpeaking: false });
-    } catch {}
+      console.log("已重置播放状态");
+      
+      // 重置停止标记，延迟重置以防止立即重启
+      setTimeout(() => {
+        stopAllRef.current = false;
+        console.log("已重置停止标记");
+      }, 200);
+    } catch (error) {
+      console.error("停止播放时发生错误:", error);
+      // 即使出错也要重置状态
+      isPlayingRef.current = false;
+      setVoiceState({ isSpeaking: false });
+      stopAllRef.current = false;
+    }
   }, [setVoiceState]);
 
   return {
