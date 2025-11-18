@@ -199,7 +199,7 @@ export function useSocket() {
           currentSourceRef.current = source;
           source.buffer = audioBuffer;
           source.connect(audioContext.destination);
-          
+
           await new Promise<void>((resolve) => {
             source.onended = () => {
               if (currentSourceRef.current === source) currentSourceRef.current = null;
@@ -207,7 +207,7 @@ export function useSocket() {
             };
             source.start();
           });
-          
+
           // 在每次播放开始后检查是否需要停止
           if (stopAllRef.current) {
             console.log("播放期间收到停止信号");
@@ -239,68 +239,76 @@ export function useSocket() {
   }, [getAudioContext, setVoiceState]);
 
   // 播放音频流块（实时流式播放）
-  const playAudioStreamChunk = useCallback(async (audioData: ArrayBuffer, _text?: string) => {
-    try {
-      // 如果正在停止，不接收新的音频块
-      if (stopAllRef.current) {
-        console.log("正在停止，忽略新的音频块");
-        return;
-      }
-      
-      if (!audioData || audioData.byteLength === 0) return;
-      audioQueueRef.current.push(audioData);
-      if (!isPlayingRef.current) {
-        processAudioQueue();
-      }
-    } catch (error) {
-      console.error("播放音频流块失败:", error);
-    }
-  }, [processAudioQueue]);
-
-  const playAudioResponse = useCallback(async (audioData: ArrayBuffer, text?: string) => {
-    try {
-      setVoiceState({ isSpeaking: true });
-      if (audioData && audioData.byteLength > 0) {
-        const audioContext = getAudioContext();
-        const audioBuffer = await audioContext.decodeAudioData(audioData.slice(0));
-        const source = audioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
-        source.onended = () => {
-          setVoiceState({ isSpeaking: false });
-        };
-        source.start();
-        return;
-      }
-      if (text && "speechSynthesis" in window) {
-        const settings = getSettings();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = "zh-CN";
-        utterance.rate = settings.voiceRate;
-        utterance.pitch = settings.voicePitch;
-        utterance.volume = 1.0;
-        const voices = window.speechSynthesis.getVoices();
-        const preferredVoice = voices.find(
-          (voice) => voice.lang.includes("zh") && voice.name.includes(settings.voiceGender === "female" ? "Female" : "Male")
-        );
-        if (preferredVoice) {
-          utterance.voice = preferredVoice;
+  const playAudioStreamChunk = useCallback(
+    async (audioData: ArrayBuffer, _text?: string) => {
+      try {
+        // 如果正在停止，不接收新的音频块
+        if (stopAllRef.current) {
+          console.log("正在停止，忽略新的音频块");
+          return;
         }
-        utterance.onend = () => {
-          setVoiceState({ isSpeaking: false });
-        };
-        utterance.onerror = () => {
-          setVoiceState({ isSpeaking: false });
-        };
-        window.speechSynthesis.speak(utterance);
-        return;
+
+        if (!audioData || audioData.byteLength === 0) return;
+        audioQueueRef.current.push(audioData);
+        if (!isPlayingRef.current) {
+          processAudioQueue();
+        }
+      } catch (error) {
+        console.error("播放音频流块失败:", error);
       }
-      setVoiceState({ isSpeaking: false });
-    } catch (error) {
-      console.error("播放音频失败:", error);
-      setVoiceState({ isSpeaking: false });
-    }
-  }, [getAudioContext, setVoiceState]);
+    },
+    [processAudioQueue]
+  );
+
+  const playAudioResponse = useCallback(
+    async (audioData: ArrayBuffer, text?: string) => {
+      try {
+        setVoiceState({ isSpeaking: true });
+        if (audioData && audioData.byteLength > 0) {
+          const audioContext = getAudioContext();
+          const audioBuffer = await audioContext.decodeAudioData(audioData.slice(0));
+          const source = audioContext.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(audioContext.destination);
+          source.onended = () => {
+            setVoiceState({ isSpeaking: false });
+          };
+          source.start();
+          return;
+        }
+        if (text && "speechSynthesis" in window) {
+          const settings = getSettings();
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.lang = "zh-CN";
+          utterance.rate = settings.voiceRate;
+          utterance.pitch = settings.voicePitch;
+          utterance.volume = 1.0;
+          const voices = window.speechSynthesis.getVoices();
+          const preferredVoice = voices.find(
+            (voice) =>
+              voice.lang.includes("zh") &&
+              voice.name.includes(settings.voiceGender === "female" ? "Female" : "Male")
+          );
+          if (preferredVoice) {
+            utterance.voice = preferredVoice;
+          }
+          utterance.onend = () => {
+            setVoiceState({ isSpeaking: false });
+          };
+          utterance.onerror = () => {
+            setVoiceState({ isSpeaking: false });
+          };
+          window.speechSynthesis.speak(utterance);
+          return;
+        }
+        setVoiceState({ isSpeaking: false });
+      } catch (error) {
+        console.error("播放音频失败:", error);
+        setVoiceState({ isSpeaking: false });
+      }
+    },
+    [getAudioContext, setVoiceState]
+  );
 
   const sendVoiceInput = useCallback((audioData: ArrayBuffer, language?: string) => {
     if (socketRef.current) {
@@ -308,36 +316,45 @@ export function useSocket() {
     }
   }, []);
 
-  const sendTextCommand = useCallback((text: string) => {
-    if (socketRef.current) {
-      addMessage("user", text);
-      socketRef.current.sendTextCommand(text);
-    }
-  }, [addMessage]);
+  const sendTextCommand = useCallback(
+    (text: string) => {
+      if (socketRef.current) {
+        addMessage("user", text);
+        socketRef.current.sendTextCommand(text);
+      }
+    },
+    [addMessage]
+  );
 
-  const confirmAction = useCallback((confirmationId: string, approved: boolean) => {
-    if (socketRef.current) {
-      socketRef.current.confirmAction(confirmationId, approved);
-      setSessionState({
-        hasPendingConfirmation: false,
-        hasPendingToolCall: false,
-        isCanceled: false,
-        confirmationRequest: undefined,
-      });
-    }
-  }, [setSessionState]);
+  const confirmAction = useCallback(
+    (confirmationId: string, approved: boolean) => {
+      if (socketRef.current) {
+        socketRef.current.confirmAction(confirmationId, approved);
+        setSessionState({
+          hasPendingConfirmation: false,
+          hasPendingToolCall: false,
+          isCanceled: false,
+          confirmationRequest: undefined,
+        });
+      }
+    },
+    [setSessionState]
+  );
 
-  const cancel = useCallback((silent: boolean = false) => {
-    if (socketRef.current) {
-      socketRef.current.cancel(silent);
-      setSessionState({
-        hasPendingConfirmation: false,
-        hasPendingToolCall: false,
-        isCanceled: true,
-        confirmationRequest: undefined,
-      });
-    }
-  }, [setSessionState]);
+  const cancel = useCallback(
+    (silent: boolean = false) => {
+      if (socketRef.current) {
+        socketRef.current.cancel(silent);
+        setSessionState({
+          hasPendingConfirmation: false,
+          hasPendingToolCall: false,
+          isCanceled: true,
+          confirmationRequest: undefined,
+        });
+      }
+    },
+    [setSessionState]
+  );
 
   const getSystemInfo = useCallback(() => {
     socketRef.current?.getSystemInfo();
@@ -367,11 +384,11 @@ export function useSocket() {
     try {
       // 设置停止标记，阻止后续播放
       stopAllRef.current = true;
-      
+
       // 清空音频队列
       audioQueueRef.current.length = 0;
       console.log("已清空音频队列");
-      
+
       // 强制停止当前播放的音频源
       if (currentSourceRef.current) {
         console.log("尝试停止当前音频源");
@@ -385,7 +402,7 @@ export function useSocket() {
         }
         currentSourceRef.current = null;
       }
-      
+
       // 关闭整个音频上下文
       if (audioContextRef.current && audioContextRef.current.state === "running") {
         console.log("关闭音频上下文");
@@ -398,18 +415,18 @@ export function useSocket() {
         audioContextRef.current = null;
         console.log("音频上下文已置空");
       }
-      
+
       // 停止Web Speech API
       if (typeof window !== "undefined" && "speechSynthesis" in window) {
         console.log("停止Web Speech API");
         window.speechSynthesis.cancel();
       }
-      
+
       // 重置播放状态
       isPlayingRef.current = false;
       setVoiceState({ isSpeaking: false });
       console.log("已重置播放状态");
-      
+
       // 重置停止标记，延迟重置以防止立即重启
       setTimeout(() => {
         stopAllRef.current = false;
