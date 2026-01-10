@@ -1,4 +1,4 @@
-const SessionStore = require("../../utils/sessionStore");
+const SessionStore = require("../utils/sessionStore");
 
 describe("SessionStore", () => {
   let sessionStore;

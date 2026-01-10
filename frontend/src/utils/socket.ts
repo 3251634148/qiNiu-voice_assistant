@@ -36,10 +36,11 @@ class SocketService {
     this.connectionPromise = new Promise((resolve, reject) => {
       this.socket = io(this.serverUrl, {
         reconnection: true,
-        reconnectionAttempts: 3, // 限制重连次数
-        reconnectionDelay: 1000, // 重连延迟
-        reconnectionDelayMax: 5000, // 最大重连延迟
-        timeout: 10000, // 连接超时时间
+        reconnectionAttempts: Infinity, // 无限重连
+        reconnectionDelay: 1000, // 重连延迟1秒
+        reconnectionDelayMax: 5000, // 最大重连延迟5秒
+        timeout: 20000, // 连接超时时间20秒
+        transports: ["websocket", "polling"], // 支持多种传输方式
       });
 
       this.socket.on("connect", () => {
@@ -93,11 +94,11 @@ class SocketService {
   }
 
   // 发送文本命令
-  sendTextCommand(text: string) {
+  sendTextCommand(text: string, requestId?: string) {
     if (!this.socket) {
       throw new Error("未连接到服务器");
     }
-    this.socket.emit("text-command", { text });
+    this.socket.emit("text-command", { text, requestId });
   }
 
   // 获取系统信息
@@ -121,6 +122,33 @@ class SocketService {
       throw new Error("未连接到服务器");
     }
     this.socket.emit("cancel", { silent: !!silent });
+  }
+
+  // 停止TTS播放
+  stopTTS() {
+    if (!this.socket) {
+      console.warn("未连接到服务器，无法停止TTS");
+      return;
+    }
+    this.socket.emit("stop-tts");
+  }
+
+  // 停止音乐播放
+  stopMusic() {
+    if (!this.socket) {
+      console.warn("未连接到服务器，无法停止音乐");
+      return;
+    }
+    this.socket.emit("stop-music");
+  }
+
+  // 通用emit方法
+  emit(event: string, data?: any) {
+    if (!this.socket) {
+      console.warn("未连接到服务器，无法发送事件:", event);
+      return;
+    }
+    this.socket.emit(event, data);
   }
 
   clearSession() {
@@ -187,7 +215,9 @@ class SocketService {
     this.socket?.on("assistant-message", callback);
   }
 
-  onAudioResponse(callback: (data: { audioData: ArrayBuffer; text?: string }) => void) {
+  onAudioResponse(
+    callback: (data: { audioData: ArrayBuffer; text?: string; requestId?: string }) => void
+  ) {
     this.socket?.on("audio-response", callback);
   }
 
@@ -241,7 +271,7 @@ class SocketService {
   }
 
   onAudioChunk(
-    callback: (data: { audioData: ArrayBuffer; text: string; isComplete: boolean }) => void
+    callback: (data: { audioData: ArrayBuffer; text: string; requestId?: string; isComplete: boolean }) => void
   ) {
     this.socket?.on("audio-chunk", callback);
   }

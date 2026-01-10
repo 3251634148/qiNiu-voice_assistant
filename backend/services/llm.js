@@ -3,8 +3,8 @@ const logger = require("../utils/logger");
 
 class LLMService {
   constructor() {
-    // 确保只使用千问API，不依赖任何OpenAI配置
-    const apiKey = process.env.DASHSCOPE_API_KEY || "sk-846133080d6247e6a6ae8d2cd44e8d02";
+    // 仅从环境变量读取千问API Key，避免把密钥硬编码进代码
+    const apiKey = process.env.DASHSCOPE_API_KEY;
 
     if (!apiKey) {
       throw new Error("千问API密钥未配置，请设置DASHSCOPE_API_KEY环境变量");
@@ -31,10 +31,17 @@ class LLMService {
 - 如需要澄清，只提出一个关键问题，不要连续追问
 - 回答优先直接给结论，必要时再给一句简短的下一步建议
 
+回复长度控制（非常重要）：
+- 默认尽量控制在50字以内，能更短就更短
+- 不要为了追求字数而截断语义；如果必须解释清楚，可以适当变长
+- 用户明确要求详细回答、朗读诗歌、讲故事等场景：可以放宽，但仍尽量精炼
+- 如果用户说"简短回答"、"一句话"等，必须严格遵守
+
 工具调用说明：
 - 如确需执行操作，请先用自然语言简短确认意图，再进行工具调用
 - 仅可使用以下工具：play_music、stop_music、write_article、write_file、open_app
 - 危险或高风险操作应提示用户确认
+- stop_music 工具仅在用户明确要求停止、暂停、关闭音乐时才使用
 
 始终以中文为主，保留必要的英文专有名词。输出必须是纯文本、适合TTS朗读，不包含任何与朗读无关的符号。`;
 
@@ -55,12 +62,12 @@ class LLMService {
               description: "搜索的歌曲或艺术家名称（可选）",
             },
           },
-          required: ["source"],
+          // source 可选：缺省时由后端自动选择可用播放器/来源
         },
       },
       {
         name: "stop_music",
-        description: "停止音乐播放",
+        description: "停止当前正在播放的音乐。仅当用户明确要求停止音乐、暂停音乐、关闭音乐时才调用此工具。不要在用户没有提及音乐的情况下调用。",
         parameters: {
           type: "object",
           properties: {},
@@ -141,7 +148,7 @@ class LLMService {
         model: model,
         messages: [{ role: "system", content: this.systemPrompt }, ...messages],
         temperature: 0.7,
-        max_tokens: 1000,
+        max_tokens: 512,
         tools: tools.map((tool) => ({
           type: "function",
           function: tool,
@@ -159,6 +166,52 @@ class LLMService {
       };
     } catch (error) {
       logger.error("千问LLM调用失败:", error);
+      throw new Error(`千问LLM服务调用失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 纯文本流式输出（用于低延迟语音回复）。
+   * 注意：此模式不启用工具调用，避免“先开口后发现需要工具调用”导致的体验问题。
+   *
+   * @param {Array<{role: string, content: string}>} messages - 对话消息（不含system）
+   * @param {Object} options - 选项
+   * @param {string|null} options.modelSelect - 指定模型
+   * @param {(delta: string) => void} [options.onDelta] - 增量文本回调
+   * @returns {Promise<{text: string, model: string}>}
+   */
+  async streamText(messages, options = {}) {
+    const { modelSelect = null, onDelta = null } = options;
+
+    try {
+      const model = modelSelect || this.selectModel(messages);
+      logger.info(`调用千问LLM流式服务，模型: ${model}`);
+
+      const stream = await this.openai.chat.completions.create({
+        model,
+        messages: [{ role: "system", content: this.systemPrompt }, ...messages],
+        temperature: 0.7,
+        max_tokens: 512,
+        stream: true,
+      });
+
+      let fullText = "";
+
+      for await (const part of stream) {
+        const delta = part?.choices?.[0]?.delta?.content;
+        if (!delta) {
+          continue;
+        }
+
+        fullText += delta;
+        if (onDelta && typeof onDelta === "function") {
+          onDelta(delta);
+        }
+      }
+
+      return { text: fullText, model };
+    } catch (error) {
+      logger.error("千问LLM流式调用失败:", error);
       throw new Error(`千问LLM服务调用失败: ${error.message}`);
     }
   }

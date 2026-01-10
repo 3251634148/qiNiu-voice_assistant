@@ -107,6 +107,7 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
+temp_md/
 *.tmp
 *.temp
 
@@ -120,3 +121,8 @@ release/
 
 # Agent doc
 AGENTS.md
+md/
+.codebuddy/
+
+# settings
+.env

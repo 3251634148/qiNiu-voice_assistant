@@ -189,13 +189,17 @@ class QwenTTSWebSocket {
     this.audioChunks.push(data);
     this.chunkCount++;
 
-    // 策略：累积足够的数据再发送，确保有完整的音频格式
-    const ACCUMULATE_THRESHOLD = 16000; // 约1秒的16kHz音频数据
+    // 策略：累积一定数据再发送（降低首音延迟）
+    // - 首块阈值更小，优先尽快出声
+    // - 后续块阈值稍大，降低消息频率
+    const firstChunkThreshold = 4000; // 约0.25秒的16kHz/16bit/mono PCM
+    const nextChunkThreshold = 12000; // 约0.75秒
+    const accumulateThreshold = this.isFirstChunk ? firstChunkThreshold : nextChunkThreshold;
 
     if (
       this.onAudioChunk &&
       typeof this.onAudioChunk === "function" &&
-      this.getTotalAudioSize() >= ACCUMULATE_THRESHOLD
+      this.getTotalAudioSize() >= accumulateThreshold
     ) {
       // 创建完整的WAV格式音频
       const pcmData = this.mergeAudioChunks();
@@ -205,6 +209,7 @@ class QwenTTSWebSocket {
 
         logger.info(`发送完整WAV音频，大小: ${completeWav.length} bytes`);
         this.onAudioChunk(completeWav);
+        this.isFirstChunk = false;
 
         // 重置累积器
         this.audioChunks = [];
@@ -269,6 +274,7 @@ class QwenTTSWebSocket {
     this.audioBuffer = Buffer.alloc(0);
     this.audioChunks = []; // 重置音频块数组
     this.chunkCount = 0;
+    this.isFirstChunk = true; // 重置首块标记，降低首音延迟
 
     try {
       if (!this.isConnected) {
@@ -305,9 +311,14 @@ class QwenTTSWebSocket {
         }
       }
 
+      const pcmLength = this.audioBuffer.length;
+      const wavHeader = this.createWavHeader(pcmLength);
+      const fullAudioWithHeader = Buffer.concat([wavHeader, this.audioBuffer]);
+
       return {
         success: true,
-        fullAudio: this.audioBuffer,
+        fullAudio: fullAudioWithHeader,
+        fullAudioPcmLength: pcmLength,
         finalResult: { status: "completed" },
         chunkCount: this.chunkCount,
         taskId: taskId,

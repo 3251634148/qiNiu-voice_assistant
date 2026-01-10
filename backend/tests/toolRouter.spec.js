@@ -1,4 +1,4 @@
-const ToolRouter = require("../../services/toolRouter");
+const ToolRouter = require("../services/toolRouter");
 
 describe("ToolRouter", () => {
   let toolRouter;

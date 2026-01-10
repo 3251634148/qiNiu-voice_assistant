@@ -1,4 +1,4 @@
-const { exec } = require("node:child_process");
+const { exec, execFile } = require("node:child_process");
 const fs = require("node:fs").promises;
 const path = require("node:path");
 const os = require("node:os");
@@ -8,6 +8,10 @@ class SystemController {
   constructor() {
     this.platform = os.platform();
     this.homeDir = os.homedir();
+
+    // macOS 应用索引缓存（避免每次 open_app 都全盘扫描）
+    this.macAppIndex = null;
+    this.macAppIndexBuiltAt = 0;
   }
 
   async executeAction(action) {
@@ -63,19 +67,161 @@ class SystemController {
     }
   }
 
+  execFileAsync(command, args) {
+    return new Promise((resolve, reject) => {
+      execFile(command, args, (error, stdout, stderr) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve({ stdout, stderr });
+      });
+    });
+  }
+
+  normalizeMacAppQuery(text) {
+    return String(text || "")
+      .toLowerCase()
+      .replace(/\.app$/i, "")
+      .replace(/[\s._-]/g, "")
+      .trim();
+  }
+
+  getMacAppAliasCandidates(appName) {
+    const raw = String(appName || "").trim();
+    const normalized = this.normalizeMacAppQuery(raw);
+
+    const aliasMap = {
+      // 常见中英文别名（不是白名单，仅用于提升匹配成功率）
+      "微信": ["WeChat"],
+      "wechat": ["WeChat", "微信"],
+      "企业微信": ["WeCom", "WeChat Work"],
+      "wecom": ["WeCom", "企业微信"],
+      "qq音乐": ["QQMusic"],
+      "qqmusic": ["QQMusic", "QQ音乐"],
+    };
+
+    const candidates = [raw];
+
+    const aliasList = aliasMap[raw] || aliasMap[normalized] || [];
+    for (const alias of aliasList) {
+      candidates.push(alias);
+    }
+
+    // 去重
+    return [...new Set(candidates.filter(Boolean))];
+  }
+
+  getMacAppSearchDirs() {
+    return [
+      "/Applications",
+      "/Applications/Utilities",
+      "/System/Applications",
+      "/System/Applications/Utilities",
+      path.join(this.homeDir, "Applications"),
+    ];
+  }
+
+  async buildMacAppIndex() {
+    const dirs = this.getMacAppSearchDirs();
+    const apps = [];
+
+    for (const dirPath of dirs) {
+      try {
+        const items = await fs.readdir(dirPath, { withFileTypes: true });
+        for (const item of items) {
+          if (!item.isDirectory()) {
+            continue;
+          }
+          if (!item.name.toLowerCase().endsWith(".app")) {
+            continue;
+          }
+
+          const displayName = item.name.replace(/\.app$/i, "");
+          const fullPath = path.join(dirPath, item.name);
+          apps.push({
+            displayName,
+            fullPath,
+            normalized: this.normalizeMacAppQuery(displayName),
+          });
+        }
+      } catch (_error) {
+        // 忽略不存在或无权限目录
+      }
+    }
+
+    return apps;
+  }
+
+  async getMacAppIndex() {
+    const cacheTtlMs = 60 * 1000;
+    if (this.macAppIndex && Date.now() - this.macAppIndexBuiltAt < cacheTtlMs) {
+      return this.macAppIndex;
+    }
+
+    const index = await this.buildMacAppIndex();
+    this.macAppIndex = index;
+    this.macAppIndexBuiltAt = Date.now();
+    return index;
+  }
+
+  async findInstalledMacApp(appName) {
+    const candidates = this.getMacAppAliasCandidates(appName);
+    const index = await this.getMacAppIndex();
+
+    for (const candidate of candidates) {
+      const normalized = this.normalizeMacAppQuery(candidate);
+
+      const exact = index.find((app) => app.normalized === normalized);
+      if (exact) {
+        return exact;
+      }
+
+      const fuzzy = index.find((app) => app.normalized.includes(normalized) || normalized.includes(app.normalized));
+      if (fuzzy) {
+        return fuzzy;
+      }
+    }
+
+    return null;
+  }
+
   async openApplication(appName) {
+    const name = String(appName || "").trim();
+    if (!name) {
+      throw new Error("应用程序名称不能为空");
+    }
+
+    if (this.platform === "darwin") {
+      const match = await this.findInstalledMacApp(name);
+
+      try {
+        if (match?.fullPath) {
+          await this.execFileAsync("open", [match.fullPath]);
+          return { success: true, message: `已打开 ${match.displayName}` };
+        }
+
+        // 兜底：让系统根据名称解析（某些应用不在默认目录，但可被 LaunchServices 识别）
+        await this.execFileAsync("open", ["-a", name]);
+        return { success: true, message: `已打开 ${name}` };
+      } catch (error) {
+        if (!match) {
+          throw new Error(`未找到已安装应用: ${name}`);
+        }
+        throw new Error(`打开应用失败: ${error.message}`);
+      }
+    }
+
+    // 其他平台保持原有实现（由 safety.js 做基础字符校验）
     return new Promise((resolve, reject) => {
       let command;
 
       switch (this.platform) {
         case "win32":
-          command = `start "" "${appName}"`;
-          break;
-        case "darwin":
-          command = `open -a "${appName}"`;
+          command = `start "" "${name}"`;
           break;
         case "linux":
-          command = `${appName}`;
+          command = `${name}`;
           break;
         default:
           reject(new Error("不支持的平台"));
@@ -86,7 +232,7 @@ class SystemController {
         if (error) {
           reject(error);
         } else {
-          resolve({ success: true, message: `已打开 ${appName}` });
+          resolve({ success: true, message: `已打开 ${name}` });
         }
       });
     });

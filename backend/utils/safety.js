@@ -222,7 +222,18 @@ class SafetyService {
     // 检查参数中是否包含危险内容 - 使用更精确的匹配
     const argsString = JSON.stringify(args).toLowerCase();
     for (const dangerousCmd of this.dangerousCommands) {
-      // 使用正则表达式确保完整匹配命令，避免误报
+      // 优先用更稳健的匹配：对包含特殊字符的命令使用子串匹配，避免 \b 边界导致漏检
+      const loweredCmd = String(dangerousCmd).toLowerCase();
+      const needsSimpleMatch = /[^a-z0-9_\s]/i.test(dangerousCmd);
+
+      if (needsSimpleMatch) {
+        if (argsString.includes(loweredCmd)) {
+          return { valid: false, reason: `参数包含危险命令: ${dangerousCmd}` };
+        }
+        continue;
+      }
+
+      // 对纯“单词/空格”命令使用边界匹配，降低误报
       const escapedCmd = dangerousCmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const regex = new RegExp(`\\b${escapedCmd}\\b`, "i");
       if (regex.test(argsString)) {
@@ -236,12 +247,9 @@ class SafetyService {
   validatePlayMusic(args) {
     const { source, query } = args;
 
-    if (!source) {
-      return { valid: false, reason: "缺少音乐来源参数" };
-    }
-
+    // source 可选：缺省时由后端自动选择可用播放器/来源
     const allowedSources = ["spotify", "apple", "local"];
-    if (!allowedSources.includes(source)) {
+    if (source && !allowedSources.includes(source)) {
       return { valid: false, reason: `不支持的音乐来源: ${source}` };
     }
 
@@ -342,18 +350,23 @@ class SafetyService {
       return { valid: false, reason: "应用程序名称必须是字符串" };
     }
 
-    // 检查是否在白名单中
-    const normalizedName = name.toLowerCase();
-    const isAllowed = this.allowedApps.some(
-      (allowedApp) => normalizedName.includes(allowedApp) || allowedApp.includes(normalizedName)
-    );
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      return { valid: false, reason: "应用程序名称不能为空" };
+    }
 
-    if (!isAllowed) {
-      return {
-        valid: false,
-        reason: `应用程序 "${name}" 不在允许的白名单中`,
-        suggestion: "请选择允许的应用程序或联系管理员添加到白名单",
-      };
+    if (trimmedName.length > 200) {
+      return { valid: false, reason: "应用程序名称过长" };
+    }
+
+    // 禁止用户直接传路径，统一走“已安装应用检索”逻辑
+    if (trimmedName.includes("/") || trimmedName.includes("\\")) {
+      return { valid: false, reason: "应用程序名称不应包含路径分隔符" };
+    }
+
+    // 基础注入防护：禁止控制字符与明显的 shell 元字符
+    if (/\r|\n|\0/.test(trimmedName) || /[;&|<>]/.test(trimmedName)) {
+      return { valid: false, reason: "应用程序名称包含不安全字符" };
     }
 
     return { valid: true };
@@ -384,10 +397,12 @@ class SafetyService {
       }
 
       // 系统路径风险更高
-      const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(os.homedir(), filePath);
-      if (this.systemPaths.some((sysPath) => absolutePath.startsWith(sysPath))) {
-        adjustedRisk.level = "high";
-        adjustedRisk.requiresConfirmation = true;
+      if (typeof filePath === "string" && filePath.trim()) {
+        const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(os.homedir(), filePath);
+        if (this.systemPaths.some((sysPath) => absolutePath.startsWith(sysPath))) {
+          adjustedRisk.level = "high";
+          adjustedRisk.requiresConfirmation = true;
+        }
       }
     }
 
@@ -438,7 +453,9 @@ class SafetyService {
 
     if (toolName === "play_music") {
       const { source, query } = args;
-      suggestions.push(`将播放${source}音乐${query ? `: ${query}` : ""}`);
+      const sourceText = source ? `${source} ` : "";
+      const autoHint = source ? "" : "（自动选择播放器）";
+      suggestions.push(`将播放${sourceText}音乐${query ? `: ${query}` : ""}${autoHint}`);
     }
 
     return suggestions;
@@ -465,8 +482,11 @@ class SafetyService {
     const { name, arguments: args } = toolCall;
 
     switch (name) {
-      case "play_music":
-        return `播放${args.source}音乐${args.query ? `: ${args.query}` : ""}`;
+      case "play_music": {
+        const sourceText = args.source ? `${args.source} ` : "";
+        const autoHint = args.source ? "" : "（自动选择播放器）";
+        return `播放${sourceText}音乐${args.query ? `: ${args.query}` : ""}${autoHint}`;
+      }
       case "stop_music":
         return "停止音乐播放";
       case "write_article":

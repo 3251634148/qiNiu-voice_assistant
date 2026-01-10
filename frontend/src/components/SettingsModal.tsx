@@ -1,19 +1,13 @@
 import { Settings, Shield, Volume2, Wifi, WifiOff, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { useSocket } from "../hooks/useSocket";
+
+import { useSocketContext } from "../hooks/SocketProvider";
+import type { AppSettings } from "../utils/settings";
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-}
-
-interface AppSettings {
-  voiceGender: "male" | "female";
-  voiceRate: number;
-  voicePitch: number;
-  allowLocalControl: boolean;
-  voiceModel: string;
 }
 
 type VoiceItem = { label: string; model: string; gender: "male" | "female"; desc: string };
@@ -65,7 +59,7 @@ const VOICES: VoiceItem[] = [
 ];
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const { updateTTSSettings, getTTSSettings } = useSocket();
+  const { updateTTSSettings, getTTSSettings } = useSocketContext();
   const [settings, setSettings] = useState<AppSettings>({
     voiceGender: "female",
     voiceRate: 1.0,
@@ -128,8 +122,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   const modal = (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[9999]">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-md mx-4 max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between p-6 border-b border-gray-200">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between p-6 border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center gap-2">
             <Settings size={24} className="text-gray-700" />
             <h2 className="text-xl font-semibold text-gray-900">应用设置</h2>
@@ -152,7 +146,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           </button>
         </div>
 
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-6 overflow-y-auto flex-1">
           <div className="space-y-4">
             <div className="flex items-center gap-2">
               <Volume2 size={20} className="text-gray-600" />
@@ -164,12 +158,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <div className="text-sm text-gray-600 mb-2">男声</div>
-                  <div className="border rounded-lg h-40 overflow-y-auto p-2">
+                  <div className="border rounded-lg h-32 overflow-y-auto p-2">
                     <div className="space-y-2">
-                      {VOICES.filter(v=>v.gender==="male").map((v) => (
+                      {VOICES.filter((v) => v.gender === "male").map((v) => (
                         <button
                           key={v.model}
-                          onClick={() => setSettings((prev) => ({ ...prev, voiceModel: v.model, voiceGender: "male" }))}
+                          onClick={() =>
+                            setSettings((prev) => ({
+                              ...prev,
+                              voiceModel: v.model,
+                              voiceGender: "male",
+                            }))
+                          }
                           className={`w-full text-left px-3 py-2 rounded-md border ${
                             settings.voiceModel === v.model
                               ? "border-blue-500 bg-blue-50 text-blue-700"
@@ -184,12 +184,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 </div>
                 <div>
                   <div className="text-sm text-gray-600 mb-2">女声</div>
-                  <div className="border rounded-lg h-40 overflow-y-auto p-2">
+                  <div className="border rounded-lg h-32 overflow-y-auto p-2">
                     <div className="space-y-2">
-                      {VOICES.filter(v=>v.gender==="female").map((v) => (
+                      {VOICES.filter((v) => v.gender === "female").map((v) => (
                         <button
                           key={v.model}
-                          onClick={() => setSettings((prev) => ({ ...prev, voiceModel: v.model, voiceGender: "female" }))}
+                          onClick={() =>
+                            setSettings((prev) => ({
+                              ...prev,
+                              voiceModel: v.model,
+                              voiceGender: "female",
+                            }))
+                          }
                           className={`w-full text-left px-3 py-2 rounded-md border ${
                             settings.voiceModel === v.model
                               ? "border-blue-500 bg-blue-50 text-blue-700"
@@ -207,14 +213,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">语速: {settings.voiceRate.toFixed(1)}</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                语速: {settings.voiceRate.toFixed(1)}
+              </label>
               <input
                 type="range"
                 min="0.5"
                 max="2.0"
                 step="0.1"
                 value={settings.voiceRate}
-                onChange={(e) => setSettings((prev) => ({ ...prev, voiceRate: parseFloat(e.target.value) }))}
+                onChange={(e) =>
+                  setSettings((prev) => ({ ...prev, voiceRate: parseFloat(e.target.value) }))
+                }
                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
               />
               <div className="flex justify-between text-xs text-gray-500 mt-1">
@@ -225,14 +235,18 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">音调: {settings.voicePitch.toFixed(1)}</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                音调: {settings.voicePitch.toFixed(1)}
+              </label>
               <input
                 type="range"
                 min="0.5"
                 max="2.0"
                 step="0.1"
                 value={settings.voicePitch}
-                onChange={(e) => setSettings((prev) => ({ ...prev, voicePitch: parseFloat(e.target.value) }))}
+                onChange={(e) =>
+                  setSettings((prev) => ({ ...prev, voicePitch: parseFloat(e.target.value) }))
+                }
                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
               />
               <div className="flex justify-between text-xs text-gray-500 mt-1">
@@ -255,7 +269,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 <p className="text-xs text-gray-500 mt-1">关闭后将阻止所有本地应用操作请求</p>
               </div>
               <button
-                onClick={() => setSettings((prev) => ({ ...prev, allowLocalControl: !prev.allowLocalControl }))}
+                onClick={() =>
+                  setSettings((prev) => ({ ...prev, allowLocalControl: !prev.allowLocalControl }))
+                }
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
                   settings.allowLocalControl ? "bg-blue-600" : "bg-gray-200"
                 }`}
@@ -270,19 +286,27 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           </div>
         </div>
 
-        <div className="flex items-center justify-between p-6 border-t border-gray-200 bg-gray-50">
-          <button onClick={handleReset} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors">
+        <div className="flex items-center justify-between p-6 border-t border-gray-200 bg-gray-50 flex-shrink-0">
+          <button
+            onClick={handleReset}
+            className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors"
+          >
             重置默认
           </button>
           <div className="flex gap-3">
-            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 transition-colors"
+            >
               取消
             </button>
             <button
               onClick={handleSave}
               disabled={!hasChanges || isLoading}
               className={`px-4 py-2 text-sm rounded-lg transition-colors ${
-                hasChanges && !isLoading ? "bg-blue-600 text-white hover:bg-blue-700" : "bg-gray-300 text-gray-500 cursor-not-allowed"
+                hasChanges && !isLoading
+                  ? "bg-blue-600 text-white hover:bg-blue-700"
+                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
               }`}
             >
               {isLoading ? "保存中..." : "保存设置"}
@@ -295,15 +319,3 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
 
   return createPortal(modal, document.body);
 }
-
-export const getSettings = (): AppSettings => {
-  const defaultSettings: AppSettings = {
-    voiceGender: "female",
-    voiceRate: 1.0,
-    voicePitch: 1.0,
-    allowLocalControl: true,
-    voiceModel: "sambert-zhishuo-v1",
-  };
-  const loadedSettings = localStorage.getItem("appSettings");
-  return loadedSettings ? { ...defaultSettings, ...JSON.parse(loadedSettings) } : defaultSettings;
-};

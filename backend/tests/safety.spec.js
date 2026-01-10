@@ -1,4 +1,4 @@
-const SafetyService = require("../../utils/safety");
+const SafetyService = require("../utils/safety");
 
 describe("SafetyService", () => {
   let safetyService;
@@ -14,6 +14,22 @@ describe("SafetyService", () => {
         name: "play_music",
         arguments: {
           source: "spotify",
+          query: "test song",
+        },
+      };
+
+      const result = await safetyService.validateToolCall(toolCall);
+
+      expect(result.allowed).toBe(true);
+      expect(result.riskLevel).toBe("low");
+      expect(result.requiresConfirmation).toBe(false);
+    });
+
+    test("应该允许缺省音乐来源（自动选择播放器）", async () => {
+      const toolCall = {
+        id: "test-1-2",
+        name: "play_music",
+        arguments: {
           query: "test song",
         },
       };
@@ -75,7 +91,7 @@ describe("SafetyService", () => {
 
       expect(result.allowed).toBe(false);
       expect(result.riskLevel).toBe("high");
-      expect(result.reason).toContain("不安全的文件路径");
+      expect(result.reason).toContain("危险命令");
     });
 
     test("应该允许有效的应用打开", async () => {
@@ -94,7 +110,7 @@ describe("SafetyService", () => {
       expect(result.requiresConfirmation).toBe(false);
     });
 
-    test("应该阻止不在白名单中的应用", async () => {
+    test("应该允许任意应用名称（是否安装由系统层决定）", async () => {
       const toolCall = {
         id: "test-6",
         name: "open_app",
@@ -105,9 +121,9 @@ describe("SafetyService", () => {
 
       const result = await safetyService.validateToolCall(toolCall);
 
-      expect(result.allowed).toBe(false);
-      expect(result.riskLevel).toBe("high");
-      expect(result.reason).toContain("不在允许的白名单中");
+      expect(result.allowed).toBe(true);
+      expect(result.riskLevel).toBe("low");
+      expect(result.requiresConfirmation).toBe(false);
     });
 
     test("应该阻止包含危险命令的参数", async () => {

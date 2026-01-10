@@ -1,6 +1,7 @@
 import { Mic, MicOff, Send } from "lucide-react";
-import React from "react";
-import { useSocket } from "../hooks/useSocket";
+import React, { useEffect } from "react";
+import { useSocketContext } from "../hooks/SocketProvider";
+import { useApp } from "../hooks/useApp";
 import { useVoice } from "../hooks/useVoice";
 
 interface VoiceInputProps {
@@ -8,14 +9,27 @@ interface VoiceInputProps {
 }
 
 export function VoiceInput({ disabled = false }: VoiceInputProps) {
-  const { sendTextCommand, sendVoiceInput, cancel, stopSpeaking } = useSocket();
-  const { isRecording, toggleRecording } = useVoice(async (text) => {
+  const { state } = useApp();
+  const { sendTextCommand, sendVoiceInput, cancel, stopSpeaking, stopMusic } = useSocketContext();
+  const { isRecording, startRecording, stopRecording, toggleRecording } = useVoice(async (text) => {
     await cancel(true);
     await stopSpeaking();
     sendTextCommand(text);
   }, sendVoiceInput);
   const [textInput, setTextInput] = React.useState("");
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+
+  const stopSpeakingAndMaybeStopMusic = async () => {
+    const wasSpeaking = state.voiceState.isSpeaking;
+
+    await cancel(true);
+    await stopSpeaking();
+
+    // 仅在“语音回复正在播放→用户准备重新说话”这个场景下停止音乐（方案 A）
+    if (wasSpeaking) {
+      stopMusic();
+    }
+  };
 
   const handleTextSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,8 +51,7 @@ export function VoiceInput({ disabled = false }: VoiceInputProps) {
   const handleVoiceToggle = async () => {
     try {
       if (!isRecording) {
-        await cancel(true);
-        await stopSpeaking();
+        await stopSpeakingAndMaybeStopMusic();
       }
       await toggleRecording();
     } catch (error) {
@@ -46,9 +59,72 @@ export function VoiceInput({ disabled = false }: VoiceInputProps) {
     }
   };
 
+  useEffect(() => {
+    if (disabled) {
+      return;
+    }
+
+    const isEditableTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) {
+        return false;
+      }
+      const tagName = target.tagName.toLowerCase();
+      return tagName === "input" || tagName === "textarea" || target.isContentEditable;
+    };
+
+    const handleKeyDown = async (event: KeyboardEvent) => {
+      // 按住空格键开始说话（避免在输入框里误触发）
+      if (event.code !== "Space" || event.repeat) {
+        return;
+      }
+
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (!isRecording) {
+        await stopSpeakingAndMaybeStopMusic();
+        await startRecording();
+      }
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== "Space") {
+        return;
+      }
+
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (isRecording) {
+        stopRecording();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [disabled, isRecording, startRecording, stopRecording, stopSpeakingAndMaybeStopMusic]);
+
   return (
     <div className="bg-white border-t border-gray-200 p-4">
-      <form onSubmit={handleTextSubmit} className="flex gap-3">
+      <form
+        onSubmit={handleTextSubmit}
+        className="flex gap-3"
+        onKeyDown={(e) => {
+          // 输入框内空格保持正常输入，不触发按住说话
+          e.stopPropagation();
+        }}
+      >
         <button
           type="button"
           onClick={handleVoiceToggle}
