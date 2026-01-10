@@ -98,23 +98,28 @@ class ConversationController {
           content: msg.content,
         }));
 
-      // 对话模式：优先使用低延迟流式回复（不启用工具调用），尽快开始播报
-      // 工具模式：当用户明显在请求本地操作时，再启用工具调用
-      if (!this.shouldUseToolsForText(text)) {
-        return await this.handleTextCommandLowLatency(text, messages, socket, effectiveRequestId);
-      }
-
-      // 调用LLM
+      // 统一由 LLM 判定意图与是否需要工具调用（不再用关键词抢跑）
       const llmResponse = await this.llmService.invokeLLM(messages);
+
+      const parsedAssistant = this.parseAssistantText(llmResponse.text);
+      let responseText = parsedAssistant.sayText || "";
+      const intent = this.mergeIntentWithToolCalls(parsedAssistant.intent, llmResponse.toolCalls);
+
+      // 部分模型在 toolCalls 模式下可能不给 content，为了 UI/TTS 体验给一个极短口语化承接
+      if (!String(responseText).trim() && Array.isArray(intent?.actions) && intent.actions.length > 0) {
+        responseText = "好呀，我来处理。";
+      }
 
       // 不再强制截断 LLM 回复，让 prompt 控制回复长度
       // 如果 LLM 返回较长内容（如用户要求朗读诗歌），应该完整播放
-      const responseText = llmResponse.text || "";
 
       logger.info(`LLM响应: ${socketId}`, {
         hasToolCalls: llmResponse.toolCalls.length > 0,
         toolCallNames: llmResponse.toolCalls.map((tc) => tc.function?.name || tc.name),
         responseLength: responseText.length,
+        intentMode: intent?.mode,
+        intentConfidence: intent?.confidence,
+        intentActionNames: Array.isArray(intent?.actions) ? intent.actions.map((a) => a?.name) : [],
       });
 
       // 添加助手消息到会话
@@ -123,23 +128,38 @@ class ConversationController {
         content: responseText,
         metadata: {
           toolCalls: llmResponse.toolCalls,
+          intent: intent,
           model: llmResponse.model,
           usage: llmResponse.usage,
         },
       });
 
-      // 处理工具调用
-      if (llmResponse.toolCalls.length > 0) {
-        return await this.handleToolCalls(llmResponse.toolCalls, socket);
+      // 先把文本响应发给前端展示（即便后续会执行工具）
+      if (String(responseText || "").trim()) {
+        socket.emit("assistant-message", {
+          type: "text",
+          content: responseText,
+          requestId: effectiveRequestId,
+          metadata: {
+            intent: intent,
+          },
+          timestamp: new Date().toISOString(),
+        });
       }
 
-      // 没有工具调用，直接返回文本响应
-      socket.emit("assistant-message", {
-        type: "text",
-        content: responseText,
-        requestId: effectiveRequestId,
-        timestamp: new Date().toISOString(),
-      });
+      // 处理工具调用：优先用模型的 toolCalls；若没有，则使用 INTENT_JSON.actions 作为兜底
+      const toolCallsFromModel = Array.isArray(llmResponse.toolCalls) ? llmResponse.toolCalls : [];
+      if (toolCallsFromModel.length > 0) {
+        return await this.handleToolCalls(toolCallsFromModel, socket);
+      }
+
+      const toolCallsFromIntent = this.buildToolCallsFromIntent(intent);
+      if (toolCallsFromIntent.length > 0) {
+        logger.info(`LLM未产生toolCalls，使用INTENT_JSON兜底工具调用: ${socketId}`, {
+          fallbackToolNames: toolCallsFromIntent.map((tc) => tc.function?.name || tc.name),
+        });
+        return await this.handleToolCalls(toolCallsFromIntent, socket);
+      }
 
       // 语音合成 - 使用千问TTS并支持用户设置
       try {
@@ -240,7 +260,8 @@ class ConversationController {
             `流式TTS合成完成，总音频长度(带头): ${result.fullAudio.length} bytes, PCM长度: ${totalPcmBytes} bytes, 音频块数: ${expectedChunks}, 实际发送块数: ${totalChunksSent}, 已发送PCM: ${bytesSentPcm} bytes, 覆盖率: ${(coverage * 100).toFixed(2)}%`
           );
 
-          const sentAllBytes = !streamingAborted && totalPcmBytes > 0 && bytesSentPcm >= totalPcmBytes;
+          const sentAllBytes =
+            !streamingAborted && totalPcmBytes > 0 && bytesSentPcm >= totalPcmBytes;
 
           logger.info(`流式TTS发送统计`, {
             expectedChunks,
@@ -255,7 +276,9 @@ class ConversationController {
           // 只有在发送的PCM字节覆盖了完整音频且未被中断时，才算成功
           if (sentAllBytes) {
             streamingSuccess = true;
-            logger.info(`流式TTS已发送完整音频（覆盖率 ${(coverage * 100).toFixed(2)}%），不再发送完整音频`);
+            logger.info(
+              `流式TTS已发送完整音频（覆盖率 ${(coverage * 100).toFixed(2)}%），不再发送完整音频`
+            );
           } else if (result.fullAudio.length > 0) {
             audioData = result.fullAudio;
             logger.warn(
@@ -272,11 +295,7 @@ class ConversationController {
         if (!streamingSuccess) {
           try {
             logger.info("尝试非流式TTS合成...");
-            audioData = await this.ttsService.textToSpeech(
-              responseText,
-              "zh-CN",
-              voiceSettings
-            );
+            audioData = await this.ttsService.textToSpeech(responseText, "zh-CN", voiceSettings);
             logger.info(`非流式TTS合成成功，音频长度: ${audioData.length} bytes`);
           } catch (syncError) {
             logger.error("非流式TTS也失败了:", syncError);
@@ -386,7 +405,8 @@ class ConversationController {
         // 安全校验
         const session = this.sessionStore.getOrCreateSession(socketId);
         const safetyCheck = await this.safetyService.validateToolCall(parsedToolCall, {
-          allowLocalControl: session.allowLocalControl ?? session.ttsSettings?.allowLocalControl ?? true,
+          allowLocalControl:
+            session.allowLocalControl ?? session.ttsSettings?.allowLocalControl ?? true,
         });
 
         if (!safetyCheck.allowed) {
@@ -490,7 +510,8 @@ class ConversationController {
       const result = await this.toolRouter.routeAndExecute(toolCall, {
         socketId: socketId,
         session,
-        allowLocalControl: session.allowLocalControl ?? session.ttsSettings?.allowLocalControl ?? true,
+        allowLocalControl:
+          session.allowLocalControl ?? session.ttsSettings?.allowLocalControl ?? true,
       });
 
       // 添加工具结果到会话
@@ -640,7 +661,7 @@ class ConversationController {
     try {
       logger.info(`处理用户取消: ${socketId}`, { silent });
 
-      const _session = this.sessionStore.getOrCreateSession(socketId);
+      this.sessionStore.getOrCreateSession(socketId);
 
       this.sessionStore.clearPendingConfirmation(socketId);
       this.sessionStore.clearPendingToolCall(socketId);
@@ -686,7 +707,7 @@ class ConversationController {
       session.ttsStopped = true;
 
       // 关闭TTS WebSocket连接（如果有的话）
-      if (this.ttsService && this.ttsService.qwenTTS) {
+      if (this.ttsService?.qwenTTS) {
         try {
           this.ttsService.qwenTTS.close();
         } catch (closeError) {
@@ -751,7 +772,8 @@ class ConversationController {
         rate: parseFloat(settings.rate) || 1.0,
         pitch: parseFloat(settings.pitch) || 1.0,
         model: settings.model || session.ttsSettings?.model,
-        allowLocalControl: settings.allowLocalControl ?? (session.ttsSettings?.allowLocalControl ?? true),
+        allowLocalControl:
+          settings.allowLocalControl ?? session.ttsSettings?.allowLocalControl ?? true,
       };
       if (typeof settings.allowLocalControl === "boolean") {
         session.allowLocalControl = settings.allowLocalControl;
@@ -832,7 +854,7 @@ class ConversationController {
    */
   shouldUseToolsForText(text) {
     const toolIntentKeywords = [
-      // 音乐
+      // 音乐（尽量覆盖自然口语表达）
       "播放音乐",
       "停止音乐",
       "关掉音乐",
@@ -842,14 +864,28 @@ class ConversationController {
       "来点音乐",
       "放点音乐",
       "听歌",
-      "来首歌",
-      "放首歌",
-      "播放一首",
+      "想听",
+      "我要听",
+      "我想听",
+      "来一首",
+      "来首",
+      "放一首",
+      "放首",
       "播一首",
+      "播首",
+      "播放一首",
+      "放歌",
+      "播歌",
+      "来点歌",
+      "来点歌听",
 
       // 应用
       "打开",
       "启动",
+      "帮我打开",
+      "帮我启动",
+      "打开一下",
+      "启动一下",
 
       // 文件
       "写文件",
@@ -859,6 +895,60 @@ class ConversationController {
     ];
 
     return toolIntentKeywords.some((keyword) => text.includes(keyword));
+  }
+
+  inferFallbackToolCalls(text) {
+    const raw = String(text || "").trim();
+    if (!raw) {
+      return [];
+    }
+
+    const makeToolCall = (name, args) => ({
+      id: `fallback_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      function: {
+        name,
+        arguments: JSON.stringify(args || {}),
+      },
+    });
+
+    // 1) 停止音乐
+    const stopMusicRegex = /(停止|暂停|关掉|关闭|别播|别放).*(音乐|歌)/;
+    if (stopMusicRegex.test(raw)) {
+      return [makeToolCall("stop_music", {})];
+    }
+
+    // 2) 播放音乐
+    const isMusicIntent = /(音乐|歌曲|听歌|来首|来一首|我想听|我要听|想听)/.test(raw);
+    if (isMusicIntent) {
+      const match = raw.match(
+        /(?:我想听|我要听|想听|听|放|播(?:放)?|来一首|来首|来点)\s*([^，。！？!?\n\r]+)/
+      );
+      const rawQuery = match?.[1] ? String(match[1]).trim() : "";
+
+      const query = rawQuery
+        .replace(/^(一首|首|点|一下|个)\s*/g, "")
+        .replace(/(音乐|歌曲|歌)$/g, "")
+        .trim();
+
+      return [makeToolCall("play_music", query ? { query } : {})];
+    }
+
+    // 3) 打开应用
+    const openMatch = raw.match(
+      /(?:帮我打开|帮我启动|打开一下|启动一下|打开|启动)\s*([^，。！？!?\n\r]+)/
+    );
+    if (openMatch?.[1]) {
+      const name = String(openMatch[1])
+        .replace(/(应用|软件|程序)$/g, "")
+        .trim();
+
+      // 过滤过于泛化的“应用名”
+      if (name && !/(音乐|音乐播放器|播放器|播放软件)$/.test(name)) {
+        return [makeToolCall("open_app", { name })];
+      }
+    }
+
+    return [];
   }
 
   /**
@@ -874,7 +964,12 @@ class ConversationController {
     let startIndex = 0;
     let match;
 
-    while ((match = boundaryRegex.exec(text)) !== null) {
+    while (true) {
+      match = boundaryRegex.exec(text);
+      if (match === null) {
+        break;
+      }
+
       const endIndex = match.index + 1;
       const candidate = text.slice(startIndex, endIndex).trim();
       if (candidate.length >= 8) {
@@ -982,7 +1077,10 @@ class ConversationController {
       );
     };
 
-    const ttsAvailable = this.ttsService && typeof this.ttsService.isAvailable === "function" && this.ttsService.isAvailable();
+    const ttsAvailable =
+      this.ttsService &&
+      typeof this.ttsService.isAvailable === "function" &&
+      this.ttsService.isAvailable();
 
     logger.info(`低延迟流式模式: ${socketId}`, {
       ttsAvailable,
@@ -1067,6 +1165,121 @@ class ConversationController {
       response: responseText,
       toolCalls: [],
     };
+  }
+
+  normalizeIntentObject(intent) {
+    if (!intent || typeof intent !== "object") {
+      return null;
+    }
+
+    const mode = typeof intent.mode === "string" ? intent.mode : null;
+    const confidence =
+      typeof intent.confidence === "number" && Number.isFinite(intent.confidence)
+        ? Math.max(0, Math.min(1, intent.confidence))
+        : null;
+
+    const actions = Array.isArray(intent.actions)
+      ? intent.actions
+          .filter((a) => a && typeof a === "object")
+          .map((a) => ({
+            name: typeof a.name === "string" ? a.name : null,
+            arguments: a.arguments && typeof a.arguments === "object" ? a.arguments : {},
+          }))
+          .filter((a) => !!a.name)
+      : [];
+
+    const reason = typeof intent.reason === "string" ? intent.reason : undefined;
+
+    return {
+      mode: mode,
+      confidence: confidence,
+      actions: actions,
+      ...(reason ? { reason } : {}),
+    };
+  }
+
+  parseAssistantText(rawText) {
+    const text = String(rawText || "");
+    const lines = text.split(/\r?\n/);
+
+    if (lines.length === 0) {
+      return { intent: null, sayText: "" };
+    }
+
+    const firstLine = String(lines[0] || "");
+    if (firstLine.startsWith("INTENT_JSON:")) {
+      const jsonPart = firstLine.slice("INTENT_JSON:".length).trim();
+      let intent = null;
+      try {
+        intent = this.normalizeIntentObject(JSON.parse(jsonPart));
+      } catch (error) {
+        logger.warn("解析INTENT_JSON失败，忽略结构化意图", { error: error.message });
+      }
+
+      const sayLines = lines.slice(1);
+      if (sayLines.length > 0 && String(sayLines[0]).startsWith("SAY:")) {
+        sayLines[0] = String(sayLines[0]).slice("SAY:".length).trimStart();
+      }
+
+      return {
+        intent,
+        sayText: sayLines.join("\n").trim(),
+      };
+    }
+
+    if (text.startsWith("SAY:")) {
+      return { intent: null, sayText: text.slice("SAY:".length).trim() };
+    }
+
+    return { intent: null, sayText: text.trim() };
+  }
+
+  mergeIntentWithToolCalls(intent, toolCalls) {
+    const normalized = this.normalizeIntentObject(intent) || { mode: null, confidence: null, actions: [] };
+    const calls = Array.isArray(toolCalls) ? toolCalls : [];
+
+    if (calls.length > 0 && normalized.actions.length === 0) {
+      const actionsFromCalls = calls
+        .map((tc) => ({
+          name: tc.function?.name || tc.name,
+          arguments: (() => {
+            try {
+              return tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
+            } catch (_e) {
+              return {};
+            }
+          })(),
+        }))
+        .filter((a) => typeof a.name === "string" && a.name);
+
+      normalized.actions = actionsFromCalls;
+    }
+
+    if (!normalized.mode) {
+      normalized.mode = normalized.actions.length > 0 ? "act" : "ask";
+    }
+
+    if (normalized.actions.length > 0 && (normalized.confidence === null || normalized.confidence === undefined)) {
+      normalized.confidence = 0.9;
+    }
+
+    return normalized;
+  }
+
+  buildToolCallsFromIntent(intent) {
+    const normalized = this.normalizeIntentObject(intent);
+    if (!normalized || !Array.isArray(normalized.actions) || normalized.actions.length === 0) {
+      return [];
+    }
+
+    const now = Date.now();
+    return normalized.actions.slice(0, 3).map((action, index) => ({
+      id: `intent_${now}_${index}_${Math.random().toString(36).slice(2, 8)}`,
+      function: {
+        name: action.name,
+        arguments: JSON.stringify(action.arguments || {}),
+      },
+    }));
   }
 
   // 设置socket实例的引用（需要在使用时注入）

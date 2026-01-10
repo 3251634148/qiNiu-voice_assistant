@@ -67,8 +67,6 @@ export function useSocket() {
         });
 
         socket.onAudioResponse((data) => {
-          if (stopAllRef.current) return;
-
           const currentRequestId = activeRequestIdRef.current;
           const incomingRequestId = data.requestId;
 
@@ -81,17 +79,16 @@ export function useSocket() {
             return;
           }
 
+          // stopSpeaking 会短暂拉起 stopAllRef，用 requestId 判定后可以安全解除
+          if (stopAllRef.current) {
+            stopAllRef.current = false;
+          }
+
           playAudioResponse(data.audioData, data.text, incomingRequestId);
         });
 
         // 监听音频流块事件
         socket.onAudioChunk((data) => {
-          // 如果正在停止播放，忽略所有音频块
-          if (stopAllRef.current) {
-            console.log("正在停止播放，忽略音频块");
-            return;
-          }
-
           const currentRequestId = activeRequestIdRef.current;
           const incomingRequestId = data.requestId;
 
@@ -103,6 +100,11 @@ export function useSocket() {
               isComplete: data.isComplete,
             });
             return;
+          }
+
+          // stopSpeaking 会短暂拉起 stopAllRef，用 requestId 判定后可以安全解除
+          if (stopAllRef.current) {
+            stopAllRef.current = false;
           }
 
           if (data.isComplete) {
@@ -466,6 +468,9 @@ export function useSocket() {
   const sendTextCommand = useCallback(
     (text: string) => {
       if (socketRef.current) {
+        // stopSpeaking 会短暂拉起 stopAllRef，这里切换到新 requestId 时立刻解除
+        stopAllRef.current = false;
+
         const requestId = generateRequestId();
         activeRequestIdRef.current = requestId;
 

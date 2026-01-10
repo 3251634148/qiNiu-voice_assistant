@@ -137,7 +137,8 @@ class SafetyService {
       logger.info(`安全校验工具调用: ${name}`, { args, context });
 
       if (context && context.allowLocalControl === false) {
-        if (name === "write_file" || name === "open_app") {
+        const localControlTools = ["write_file", "open_app", "file_control", "write_run_code", "send_message"];
+        if (localControlTools.includes(name)) {
           return {
             allowed: false,
             riskLevel: "high",
@@ -175,6 +176,15 @@ class SafetyService {
           break;
         case "open_app":
           specificValidation = this.validateOpenApp(args);
+          break;
+        case "send_message":
+          specificValidation = this.validateSendMessage(args);
+          break;
+        case "write_run_code":
+          specificValidation = this.validateWriteRunCode(args);
+          break;
+        case "file_control":
+          specificValidation = this.validateFileControl(args);
           break;
         default:
           specificValidation = { valid: false, reason: `未知的工具类型: ${name}` };
@@ -372,14 +382,107 @@ class SafetyService {
     return { valid: true };
   }
 
+  validateSendMessage(args) {
+    const { target, content, channel } = args;
+
+    if (!target) {
+      return { valid: false, reason: "缺少消息目标参数" };
+    }
+
+    if (typeof target !== "string" || target.trim().length > 200) {
+      return { valid: false, reason: "消息目标无效或过长" };
+    }
+
+    if (!content) {
+      return { valid: false, reason: "缺少消息内容参数" };
+    }
+
+    if (typeof content !== "string" || content.length > 5000) {
+      return { valid: false, reason: "消息内容无效或过长" };
+    }
+
+    if (channel && !["auto", "sms", "email", "im"].includes(channel)) {
+      return { valid: false, reason: `不支持的发送渠道: ${channel}` };
+    }
+
+    return { valid: true };
+  }
+
+  validateWriteRunCode(args) {
+    const { language, code, run } = args;
+
+    if (!language || !["javascript", "python", "bash"].includes(language)) {
+      return { valid: false, reason: "代码语言不支持或缺失" };
+    }
+
+    if (!code || typeof code !== "string" || code.length > 50000) {
+      return { valid: false, reason: "代码内容无效或过长" };
+    }
+
+    if (typeof run !== "undefined" && typeof run !== "boolean") {
+      return { valid: false, reason: "run 参数必须是布尔值" };
+    }
+
+    return { valid: true };
+  }
+
+  isPathAllowed(filePath) {
+    if (!filePath || typeof filePath !== "string") {
+      return { allowed: false, reason: "文件路径无效" };
+    }
+
+    if (filePath.includes("..") || filePath.includes("~")) {
+      return { allowed: false, reason: "文件路径包含不安全字符" };
+    }
+
+    const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(os.homedir(), filePath);
+    const isAllowed = this.allowedDirectories.some((allowedDir) => absolutePath.startsWith(allowedDir));
+
+    if (!isAllowed) {
+      return { allowed: false, reason: "文件路径不在允许的目录范围内" };
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext && this.dangerousExtensions.includes(ext)) {
+      return { allowed: false, reason: `不允许的文件类型: ${ext}` };
+    }
+
+    return { allowed: true };
+  }
+
+  validateFileControl(args) {
+    const { operation, path: filePath, destination } = args;
+
+    if (!operation || !["list", "read", "move", "copy", "delete", "mkdir"].includes(operation)) {
+      return { valid: false, reason: "文件操作类型不支持或缺失" };
+    }
+
+    const pathCheck = this.isPathAllowed(filePath);
+    if (!pathCheck.allowed) {
+      return { valid: false, reason: pathCheck.reason };
+    }
+
+    if (destination) {
+      const dstCheck = this.isPathAllowed(destination);
+      if (!dstCheck.allowed) {
+        return { valid: false, reason: `目标路径不安全: ${dstCheck.reason}` };
+      }
+    }
+
+    return { valid: true };
+  }
+
   assessRisk(toolName, args, _context) {
     // 基础风险评估
     const riskLevels = {
       play_music: { level: "low", requiresConfirmation: false },
       stop_music: { level: "low", requiresConfirmation: false },
+      open_app: { level: "low", requiresConfirmation: false },
       write_article: { level: "medium", requiresConfirmation: false },
       write_file: { level: "medium", requiresConfirmation: true },
-      open_app: { level: "low", requiresConfirmation: false },
+      send_message: { level: "medium", requiresConfirmation: true },
+      write_run_code: { level: "high", requiresConfirmation: true },
+      file_control: { level: "high", requiresConfirmation: true },
     };
 
     const baseRisk = riskLevels[toolName] || { level: "medium", requiresConfirmation: true };
@@ -458,6 +561,29 @@ class SafetyService {
       suggestions.push(`将播放${sourceText}音乐${query ? `: ${query}` : ""}${autoHint}`);
     }
 
+    if (toolName === "send_message") {
+      const { target, channel } = args;
+      const channelText = channel && channel !== "auto" ? `（渠道: ${channel}）` : "";
+      suggestions.push(`将发送消息给: ${target}${channelText}`);
+    }
+
+    if (toolName === "write_run_code") {
+      const { language, run } = args;
+      suggestions.push(`将编写${language}代码${run ? "并运行" : ""}`);
+      if (riskLevel === "high") {
+        suggestions.push("此操作可能执行本地代码，请确认是否继续");
+      }
+    }
+
+    if (toolName === "file_control") {
+      const { operation, path: filePath, destination } = args;
+      const dstText = destination ? ` → ${destination}` : "";
+      suggestions.push(`将执行文件操作: ${operation} ${filePath}${dstText}`);
+      if (riskLevel === "high") {
+        suggestions.push("此操作可能影响本地文件，请确认是否继续");
+      }
+    }
+
     return suggestions;
   }
 
@@ -495,6 +621,14 @@ class SafetyService {
         return `${args.mode === "append" ? "追加到" : args.mode === "overwrite" ? "覆盖" : "创建"}文件: ${args.path}`;
       case "open_app":
         return `打开应用程序: ${args.name}`;
+      case "send_message":
+        return `发送消息给: ${args.target}`;
+      case "write_run_code":
+        return `编写${args.language}代码${args.run ? "并运行" : ""}`;
+      case "file_control": {
+        const dstText = args.destination ? ` → ${args.destination}` : "";
+        return `文件操作: ${args.operation} ${args.path}${dstText}`;
+      }
       default:
         return `执行操作: ${name}`;
     }

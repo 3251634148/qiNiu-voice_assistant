@@ -102,6 +102,41 @@ function MessageItem({ message }: MessageItemProps) {
     );
   };
 
+  const getIntentBadge = () => {
+    const intent = message.metadata?.intent as any;
+    if (!intent || message.type !== "assistant") {
+      return null;
+    }
+
+    const modeTextMap: Record<string, string> = {
+      ask: "提问式",
+      act: "操作式",
+      both: "提问+操作",
+    };
+
+    const modeText = modeTextMap[intent.mode] || "未知";
+    const confidence =
+      typeof intent.confidence === "number" && Number.isFinite(intent.confidence)
+        ? `${Math.round(intent.confidence * 100)}%`
+        : undefined;
+
+    const actions = Array.isArray(intent.actions) ? intent.actions : [];
+    const actionNames = actions
+      .map((a: any) => a?.name)
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(", ");
+
+    const tailParts = [
+      actionNames ? `动作: ${actionNames}` : null,
+      confidence ? `置信度: ${confidence}` : null,
+    ].filter(Boolean);
+
+    const tail = tailParts.length > 0 ? `（${tailParts.join("，")}）` : "";
+
+    return <div className="text-xs opacity-80 mb-1">意图: {modeText}{tail}</div>;
+  };
+
   return (
     <div
       className={`flex ${message.type === "user" ? "justify-end" : message.type === "assistant" || message.type === "tool_call" || message.type === "tool_result" ? "justify-start" : "justify-center"} mb-4`}
@@ -121,6 +156,7 @@ function MessageItem({ message }: MessageItemProps) {
             style={getBubbleStyle()}
           >
             {getRiskLevelBadge() && <div className="mb-2">{getRiskLevelBadge()}</div>}
+            {getIntentBadge()}
             <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
             {message.metadata?.toolCall && (
               <div className="mt-2 pt-2 border-t border-current border-opacity-20">
