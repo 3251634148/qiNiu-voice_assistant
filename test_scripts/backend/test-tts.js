@@ -1,5 +1,5 @@
-const TTSService = require("./services/ttsService");
-require("dotenv").config();
+const TTSService = require("../../backend/services/ttsService");
+require("dotenv").config({ path: "../../backend/.env" });
 
 async function testTTS() {
   console.log("开始测试TTS服务...");

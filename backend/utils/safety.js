@@ -137,7 +137,8 @@ class SafetyService {
       logger.info(`安全校验工具调用: ${name}`, { args, context });
 
       if (context && context.allowLocalControl === false) {
-        if (name === "write_file" || name === "open_app") {
+        const localControlTools = ["write_file", "open_app", "file_control", "write_run_code", "send_message"];
+        if (localControlTools.includes(name)) {
           return {
             allowed: false,
             riskLevel: "high",
@@ -175,6 +176,15 @@ class SafetyService {
           break;
         case "open_app":
           specificValidation = this.validateOpenApp(args);
+          break;
+        case "send_message":
+          specificValidation = this.validateSendMessage(args);
+          break;
+        case "write_run_code":
+          specificValidation = this.validateWriteRunCode(args);
+          break;
+        case "file_control":
+          specificValidation = this.validateFileControl(args);
           break;
         default:
           specificValidation = { valid: false, reason: `未知的工具类型: ${name}` };
@@ -222,7 +232,18 @@ class SafetyService {
     // 检查参数中是否包含危险内容 - 使用更精确的匹配
     const argsString = JSON.stringify(args).toLowerCase();
     for (const dangerousCmd of this.dangerousCommands) {
-      // 使用正则表达式确保完整匹配命令，避免误报
+      // 优先用更稳健的匹配：对包含特殊字符的命令使用子串匹配，避免 \b 边界导致漏检
+      const loweredCmd = String(dangerousCmd).toLowerCase();
+      const needsSimpleMatch = /[^a-z0-9_\s]/i.test(dangerousCmd);
+
+      if (needsSimpleMatch) {
+        if (argsString.includes(loweredCmd)) {
+          return { valid: false, reason: `参数包含危险命令: ${dangerousCmd}` };
+        }
+        continue;
+      }
+
+      // 对纯“单词/空格”命令使用边界匹配，降低误报
       const escapedCmd = dangerousCmd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const regex = new RegExp(`\\b${escapedCmd}\\b`, "i");
       if (regex.test(argsString)) {
@@ -236,12 +257,9 @@ class SafetyService {
   validatePlayMusic(args) {
     const { source, query } = args;
 
-    if (!source) {
-      return { valid: false, reason: "缺少音乐来源参数" };
-    }
-
+    // source 可选：缺省时由后端自动选择可用播放器/来源
     const allowedSources = ["spotify", "apple", "local"];
-    if (!allowedSources.includes(source)) {
+    if (source && !allowedSources.includes(source)) {
       return { valid: false, reason: `不支持的音乐来源: ${source}` };
     }
 
@@ -342,18 +360,113 @@ class SafetyService {
       return { valid: false, reason: "应用程序名称必须是字符串" };
     }
 
-    // 检查是否在白名单中
-    const normalizedName = name.toLowerCase();
-    const isAllowed = this.allowedApps.some(
-      (allowedApp) => normalizedName.includes(allowedApp) || allowedApp.includes(normalizedName)
-    );
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      return { valid: false, reason: "应用程序名称不能为空" };
+    }
+
+    if (trimmedName.length > 200) {
+      return { valid: false, reason: "应用程序名称过长" };
+    }
+
+    // 禁止用户直接传路径，统一走“已安装应用检索”逻辑
+    if (trimmedName.includes("/") || trimmedName.includes("\\")) {
+      return { valid: false, reason: "应用程序名称不应包含路径分隔符" };
+    }
+
+    // 基础注入防护：禁止控制字符与明显的 shell 元字符
+    if (/\r|\n|\0/.test(trimmedName) || /[;&|<>]/.test(trimmedName)) {
+      return { valid: false, reason: "应用程序名称包含不安全字符" };
+    }
+
+    return { valid: true };
+  }
+
+  validateSendMessage(args) {
+    const { target, content, channel } = args;
+
+    if (!target) {
+      return { valid: false, reason: "缺少消息目标参数" };
+    }
+
+    if (typeof target !== "string" || target.trim().length > 200) {
+      return { valid: false, reason: "消息目标无效或过长" };
+    }
+
+    if (!content) {
+      return { valid: false, reason: "缺少消息内容参数" };
+    }
+
+    if (typeof content !== "string" || content.length > 5000) {
+      return { valid: false, reason: "消息内容无效或过长" };
+    }
+
+    if (channel && !["auto", "sms", "email", "im"].includes(channel)) {
+      return { valid: false, reason: `不支持的发送渠道: ${channel}` };
+    }
+
+    return { valid: true };
+  }
+
+  validateWriteRunCode(args) {
+    const { language, code, run } = args;
+
+    if (!language || !["javascript", "python", "bash"].includes(language)) {
+      return { valid: false, reason: "代码语言不支持或缺失" };
+    }
+
+    if (!code || typeof code !== "string" || code.length > 50000) {
+      return { valid: false, reason: "代码内容无效或过长" };
+    }
+
+    if (typeof run !== "undefined" && typeof run !== "boolean") {
+      return { valid: false, reason: "run 参数必须是布尔值" };
+    }
+
+    return { valid: true };
+  }
+
+  isPathAllowed(filePath) {
+    if (!filePath || typeof filePath !== "string") {
+      return { allowed: false, reason: "文件路径无效" };
+    }
+
+    if (filePath.includes("..") || filePath.includes("~")) {
+      return { allowed: false, reason: "文件路径包含不安全字符" };
+    }
+
+    const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(os.homedir(), filePath);
+    const isAllowed = this.allowedDirectories.some((allowedDir) => absolutePath.startsWith(allowedDir));
 
     if (!isAllowed) {
-      return {
-        valid: false,
-        reason: `应用程序 "${name}" 不在允许的白名单中`,
-        suggestion: "请选择允许的应用程序或联系管理员添加到白名单",
-      };
+      return { allowed: false, reason: "文件路径不在允许的目录范围内" };
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext && this.dangerousExtensions.includes(ext)) {
+      return { allowed: false, reason: `不允许的文件类型: ${ext}` };
+    }
+
+    return { allowed: true };
+  }
+
+  validateFileControl(args) {
+    const { operation, path: filePath, destination } = args;
+
+    if (!operation || !["list", "read", "move", "copy", "delete", "mkdir"].includes(operation)) {
+      return { valid: false, reason: "文件操作类型不支持或缺失" };
+    }
+
+    const pathCheck = this.isPathAllowed(filePath);
+    if (!pathCheck.allowed) {
+      return { valid: false, reason: pathCheck.reason };
+    }
+
+    if (destination) {
+      const dstCheck = this.isPathAllowed(destination);
+      if (!dstCheck.allowed) {
+        return { valid: false, reason: `目标路径不安全: ${dstCheck.reason}` };
+      }
     }
 
     return { valid: true };
@@ -364,9 +477,12 @@ class SafetyService {
     const riskLevels = {
       play_music: { level: "low", requiresConfirmation: false },
       stop_music: { level: "low", requiresConfirmation: false },
+      open_app: { level: "low", requiresConfirmation: false },
       write_article: { level: "medium", requiresConfirmation: false },
       write_file: { level: "medium", requiresConfirmation: true },
-      open_app: { level: "low", requiresConfirmation: false },
+      send_message: { level: "medium", requiresConfirmation: true },
+      write_run_code: { level: "high", requiresConfirmation: true },
+      file_control: { level: "high", requiresConfirmation: true },
     };
 
     const baseRisk = riskLevels[toolName] || { level: "medium", requiresConfirmation: true };
@@ -384,10 +500,12 @@ class SafetyService {
       }
 
       // 系统路径风险更高
-      const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(os.homedir(), filePath);
-      if (this.systemPaths.some((sysPath) => absolutePath.startsWith(sysPath))) {
-        adjustedRisk.level = "high";
-        adjustedRisk.requiresConfirmation = true;
+      if (typeof filePath === "string" && filePath.trim()) {
+        const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(os.homedir(), filePath);
+        if (this.systemPaths.some((sysPath) => absolutePath.startsWith(sysPath))) {
+          adjustedRisk.level = "high";
+          adjustedRisk.requiresConfirmation = true;
+        }
       }
     }
 
@@ -438,7 +556,32 @@ class SafetyService {
 
     if (toolName === "play_music") {
       const { source, query } = args;
-      suggestions.push(`将播放${source}音乐${query ? `: ${query}` : ""}`);
+      const sourceText = source ? `${source} ` : "";
+      const autoHint = source ? "" : "（自动选择播放器）";
+      suggestions.push(`将播放${sourceText}音乐${query ? `: ${query}` : ""}${autoHint}`);
+    }
+
+    if (toolName === "send_message") {
+      const { target, channel } = args;
+      const channelText = channel && channel !== "auto" ? `（渠道: ${channel}）` : "";
+      suggestions.push(`将发送消息给: ${target}${channelText}`);
+    }
+
+    if (toolName === "write_run_code") {
+      const { language, run } = args;
+      suggestions.push(`将编写${language}代码${run ? "并运行" : ""}`);
+      if (riskLevel === "high") {
+        suggestions.push("此操作可能执行本地代码，请确认是否继续");
+      }
+    }
+
+    if (toolName === "file_control") {
+      const { operation, path: filePath, destination } = args;
+      const dstText = destination ? ` → ${destination}` : "";
+      suggestions.push(`将执行文件操作: ${operation} ${filePath}${dstText}`);
+      if (riskLevel === "high") {
+        suggestions.push("此操作可能影响本地文件，请确认是否继续");
+      }
     }
 
     return suggestions;
@@ -465,8 +608,11 @@ class SafetyService {
     const { name, arguments: args } = toolCall;
 
     switch (name) {
-      case "play_music":
-        return `播放${args.source}音乐${args.query ? `: ${args.query}` : ""}`;
+      case "play_music": {
+        const sourceText = args.source ? `${args.source} ` : "";
+        const autoHint = args.source ? "" : "（自动选择播放器）";
+        return `播放${sourceText}音乐${args.query ? `: ${args.query}` : ""}${autoHint}`;
+      }
       case "stop_music":
         return "停止音乐播放";
       case "write_article":
@@ -475,6 +621,14 @@ class SafetyService {
         return `${args.mode === "append" ? "追加到" : args.mode === "overwrite" ? "覆盖" : "创建"}文件: ${args.path}`;
       case "open_app":
         return `打开应用程序: ${args.name}`;
+      case "send_message":
+        return `发送消息给: ${args.target}`;
+      case "write_run_code":
+        return `编写${args.language}代码${args.run ? "并运行" : ""}`;
+      case "file_control": {
+        const dstText = args.destination ? ` → ${args.destination}` : "";
+        return `文件操作: ${args.operation} ${args.path}${dstText}`;
+      }
       default:
         return `执行操作: ${name}`;
     }

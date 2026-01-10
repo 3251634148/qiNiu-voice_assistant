@@ -1,5 +1,6 @@
 const { exec } = require("node:child_process");
 const util = require("node:util");
+const os = require("node:os");
 const logger = require("../utils/logger");
 
 class MusicController {
@@ -7,13 +8,25 @@ class MusicController {
     this.execPromise = util.promisify(exec);
     this.currentPlayer = null;
     this.isPlaying = false;
+    this.platform = os.platform(); // 'darwin', 'win32', 'linux'
   }
 
   async playMusic(source, query = null) {
     try {
-      logger.info(`播放音乐 - 来源: ${source}, 查询: ${query}`);
+      logger.info(`播放音乐 - 来源: ${source || "auto"}, 查询: ${query}`);
 
-      switch (source) {
+      // Windows平台特殊处理
+      if (this.platform === "win32") {
+        return await this.playMusicWindows(source, query);
+      }
+
+      const effectiveSource = source || (await this.detectDefaultSource());
+      if (!source) {
+        logger.info(`自动选择音乐来源: ${effectiveSource}`);
+      }
+
+      // macOS / Linux
+      switch (effectiveSource) {
         case "spotify":
           return await this.playSpotify(query);
         case "apple":
@@ -21,7 +34,7 @@ class MusicController {
         case "local":
           return await this.playLocalMusic(query);
         default:
-          throw new Error(`不支持的音乐来源: ${source}`);
+          throw new Error(`不支持的音乐来源: ${effectiveSource}`);
       }
     } catch (error) {
       logger.error("播放音乐失败:", error);
@@ -29,38 +42,119 @@ class MusicController {
     }
   }
 
+  /**
+   * Windows平台音乐播放
+   */
+  async playMusicWindows(source, query) {
+    try {
+      // Windows使用媒体控制键播放/暂停
+      const psCommand = `
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.SendKeys]::SendWait("{MEDIAPLAYPAUSE}")
+      `;
+
+      await this.execPromise(`powershell -Command "${psCommand.replace(/\n/g, " ")}"`);
+
+      this.currentPlayer = source || "windows-media";
+      this.isPlaying = true;
+
+      return {
+        success: true,
+        source: source || "windows-media",
+        query: query,
+        message: query
+          ? `正在播放: ${query} (Windows媒体控制)`
+          : "已发送播放命令 (Windows媒体控制)",
+        player: "Windows Media Control",
+        note: "Windows使用系统媒体控制键，具体播放内容取决于当前活动的媒体应用",
+      };
+    } catch (error) {
+      throw new Error(`Windows音乐播放失败: ${error.message}`);
+    }
+  }
+
+  async detectDefaultSource() {
+    if (this.platform === "darwin") {
+      // 优先选择用户更可能安装的第三方播放器
+      if (await this.isMacAppInstalled("Spotify")) {
+        return "spotify";
+      }
+
+      // macOS 系统自带 Music / iTunes
+      if ((await this.isMacAppInstalled("Music")) || (await this.isMacAppInstalled("iTunes"))) {
+        return "apple";
+      }
+
+      return "local";
+    }
+
+    // 其他平台先走本地兜底（可按需扩展）
+    return "local";
+  }
+
+  async isMacAppInstalled(appName) {
+    try {
+      // open -R: reveal in Finder; -a: specify application
+      await this.execPromise(`open -Ra "${appName}"`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async stopMusic() {
     try {
       logger.info("停止音乐播放");
 
-      const stopCommands = [
-        "osascript -e 'tell application \"Spotify\" to pause' 2>/dev/null",
-        "osascript -e 'tell application \"Music\" to pause' 2>/dev/null",
-        "killall afplay 2>/dev/null",
-      ];
+      if (this.platform === "darwin") {
+        // macOS
+        const stopCommands = [
+          "osascript -e 'tell application \"Spotify\" to pause' 2>/dev/null",
+          "osascript -e 'tell application \"Music\" to pause' 2>/dev/null",
+          "killall afplay 2>/dev/null",
+        ];
 
-      const results = [];
+        const results = [];
 
-      for (const command of stopCommands) {
-        try {
-          const result = await this.execPromise(command);
-          if (result.stdout || result.stderr) {
-            results.push(result.stdout || result.stderr);
+        for (const command of stopCommands) {
+          try {
+            const result = await this.execPromise(command);
+            if (result.stdout || result.stderr) {
+              results.push(result.stdout || result.stderr);
+            }
+          } catch (error) {
+            // 忽略错误，继续尝试其他命令
+            results.push(error.message);
           }
-        } catch (error) {
-          // 忽略错误，继续尝试其他命令
-          results.push(error.message);
         }
+
+        this.isPlaying = false;
+        this.currentPlayer = null;
+
+        return {
+          success: true,
+          message: "已停止音乐播放",
+          results: results,
+        };
+      } else if (this.platform === "win32") {
+        // Windows - 发送媒体控制键
+        const psCommand = `
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.SendKeys]::SendWait("{MEDIAPLAYPAUSE}")
+        `;
+
+        await this.execPromise(`powershell -Command "${psCommand.replace(/\n/g, " ")}"`);
+
+        this.isPlaying = false;
+        this.currentPlayer = null;
+
+        return {
+          success: true,
+          message: "已停止音乐播放",
+        };
+      } else {
+        throw new Error(`不支持的操作系统: ${this.platform}`);
       }
-
-      this.isPlaying = false;
-      this.currentPlayer = null;
-
-      return {
-        success: true,
-        message: "已停止音乐播放",
-        results: results,
-      };
     } catch (error) {
       logger.error("停止音乐失败:", error);
       throw new Error(`停止音乐失败: ${error.message}`);
@@ -347,6 +441,24 @@ class MusicController {
 
   async pauseMusic() {
     try {
+      if (this.platform === "win32") {
+        // Windows - 发送暂停/播放切换键
+        const psCommand = `
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.SendKeys]::SendWait("{MEDIAPLAYPAUSE}")
+        `;
+
+        await this.execPromise(`powershell -Command "${psCommand.replace(/\n/g, " ")}"`);
+
+        this.isPlaying = false;
+
+        return {
+          success: true,
+          message: "音乐已暂停 (Windows媒体控制)",
+        };
+      }
+
+      // macOS
       if (this.currentPlayer === "spotify") {
         await this.execPromise("osascript -e 'tell application \"Spotify\" to pause'");
       } else if (this.currentPlayer === "apple") {
@@ -368,6 +480,22 @@ class MusicController {
 
   async nextTrack() {
     try {
+      if (this.platform === "win32") {
+        // Windows - 发送下一曲媒体键
+        const psCommand = `
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.SendKeys]::SendWait("{MEDIANEXTTRACK}")
+        `;
+
+        await this.execPromise(`powershell -Command "${psCommand.replace(/\n/g, " ")}"`);
+
+        return {
+          success: true,
+          message: "切换到下一曲 (Windows媒体控制)",
+        };
+      }
+
+      // macOS
       if (this.currentPlayer === "spotify") {
         await this.execPromise("osascript -e 'tell application \"Spotify\" to next track'");
       } else if (this.currentPlayer === "apple") {
@@ -387,6 +515,22 @@ class MusicController {
 
   async previousTrack() {
     try {
+      if (this.platform === "win32") {
+        // Windows - 发送上一曲媒体键
+        const psCommand = `
+          Add-Type -AssemblyName System.Windows.Forms
+          [System.Windows.Forms.SendKeys]::SendWait("{MEDIAPREVIOUSTRACK}")
+        `;
+
+        await this.execPromise(`powershell -Command "${psCommand.replace(/\n/g, " ")}"`);
+
+        return {
+          success: true,
+          message: "切换到上一曲 (Windows媒体控制)",
+        };
+      }
+
+      // macOS
       if (this.currentPlayer === "spotify") {
         await this.execPromise("osascript -e 'tell application \"Spotify\" to previous track'");
       } else if (this.currentPlayer === "apple") {

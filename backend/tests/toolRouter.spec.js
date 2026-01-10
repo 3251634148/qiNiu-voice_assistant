@@ -1,4 +1,4 @@
-const ToolRouter = require("../../services/toolRouter");
+const ToolRouter = require("../services/toolRouter");
 
 describe("ToolRouter", () => {
   let toolRouter;
@@ -183,7 +183,7 @@ describe("ToolRouter", () => {
     test("应该返回支持的工具列表", () => {
       const tools = toolRouter.getSupportedTools();
 
-      expect(tools).toHaveLength(5);
+      expect(tools).toHaveLength(8);
       expect(tools.map((t) => t.name)).toContain("play_music");
       expect(tools.map((t) => t.name)).toContain("stop_music");
       expect(tools.map((t) => t.name)).toContain("write_article");

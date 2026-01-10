@@ -3,13 +3,13 @@ import { Header } from "./components/Header";
 import { MessageList } from "./components/MessageList";
 import { SystemInfoDisplay } from "./components/SystemInfoDisplay";
 import { VoiceInput } from "./components/VoiceInput";
+import { SocketProvider, useSocketContext } from "./hooks/SocketProvider";
 import { AppProvider, useApp } from "./hooks/useApp";
-import { useSocket } from "./hooks/useSocket";
 import "./index.css";
 
 function AppContent() {
   const { state } = useApp();
-  const { isInitialized, confirmAction, cancel } = useSocket();
+  const { isInitialized, confirmAction, cancel } = useSocketContext();
 
   if (!isInitialized) {
     return (
@@ -64,7 +64,9 @@ function AppContent() {
 function App() {
   return (
     <AppProvider>
-      <AppContent />
+      <SocketProvider>
+        <AppContent />
+      </SocketProvider>
     </AppProvider>
   );
 }

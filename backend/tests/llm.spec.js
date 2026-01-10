@@ -1,7 +1,12 @@
-const LLMService = require("../../services/llm");
+const LLMService = require("../services/llm");
 
 describe("LLMService", () => {
   let llmService;
+
+  beforeAll(() => {
+    // 测试环境注入一个假的 key，避免构造函数直接抛错
+    process.env.DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || "test_key";
+  });
 
   beforeEach(() => {
     llmService = new LLMService();
@@ -70,50 +75,54 @@ describe("LLMService", () => {
   });
 
   describe("selectModel", () => {
-    test("应该为复杂任务选择GPT-4", () => {
+    test("应该为复杂任务选择 qwen-turbo", () => {
       const messages = [{ role: "user", content: "请写一篇关于人工智能的文章" }];
 
       const model = llmService.selectModel(messages);
 
-      expect(model).toBe("gpt-4");
+      expect(model).toBe("qwen-turbo");
     });
 
-    test("应该为简单任务选择GPT-3.5", () => {
+    test("应该为简单任务选择 qwen-plus", () => {
       const messages = [{ role: "user", content: "你好" }];
 
       const model = llmService.selectModel(messages);
 
-      expect(model).toBe("gpt-3.5-turbo");
+      expect(model).toBe("qwen-plus");
     });
 
-    test("应该为长文本选择GPT-4", () => {
+    test("应该为长文本选择 qwen-turbo", () => {
       const longText = "a".repeat(200);
       const messages = [{ role: "user", content: longText }];
 
       const model = llmService.selectModel(messages);
 
-      expect(model).toBe("gpt-4");
+      expect(model).toBe("qwen-turbo");
     });
   });
 
-  describe("shouldUseGPT4", () => {
-    test("应该对写作关键词返回true", () => {
-      expect(llmService.shouldUseGPT4("写一篇文章")).toBe(true);
-      expect(llmService.shouldUseGPT4("创建一个文件")).toBe(true);
-      expect(llmService.shouldUseGPT4("生成报告")).toBe(true);
-      expect(llmService.shouldUseGPT4("分析数据")).toBe(true);
+  describe("shouldUseAdvancedModel", () => {
+    test("应该对复杂关键词返回 true", () => {
+      expect(llmService.shouldUseAdvancedModel("写一篇文章")).toBe(true);
+      expect(llmService.shouldUseAdvancedModel("创建一个文件")).toBe(true);
+      expect(llmService.shouldUseAdvancedModel("生成报告")).toBe(true);
+      expect(llmService.shouldUseAdvancedModel("分析数据")).toBe(true);
     });
 
-    test("应该对简单查询返回false", () => {
-      expect(llmService.shouldUseGPT4("你好")).toBe(false);
-      expect(llmService.shouldUseGPT4("今天天气怎么样")).toBe(false);
-      expect(llmService.shouldUseGPT4("播放音乐")).toBe(false);
+    test("应该对简单对话返回 false", () => {
+      expect(llmService.shouldUseAdvancedModel("你好")).toBe(false);
+      expect(llmService.shouldUseAdvancedModel("今天天气怎么样")).toBe(false);
+      expect(llmService.shouldUseAdvancedModel("播放音乐")).toBe(false);
     });
 
-    test("应该对英文关键词返回true", () => {
-      expect(llmService.shouldUseGPT4("write an article")).toBe(true);
-      expect(llmService.shouldUseGPT4("create a document")).toBe(true);
-      expect(llmService.shouldUseGPT4("analyze this")).toBe(true);
+    test("应该对英文关键词返回 true", () => {
+      expect(llmService.shouldUseAdvancedModel("write an article")).toBe(true);
+      expect(llmService.shouldUseAdvancedModel("create a document")).toBe(true);
+      expect(llmService.shouldUseAdvancedModel("analyze this")).toBe(true);
+    });
+
+    test("应该对很长的文本返回 true", () => {
+      expect(llmService.shouldUseAdvancedModel("a".repeat(200))).toBe(true);
     });
   });
 
@@ -129,13 +138,15 @@ describe("LLMService", () => {
       expect(functions.map((f) => f.name)).toContain("open_app");
     });
 
-    test("函数定义应该包含正确的参数", () => {
+    test("play_music 参数应包含 source/query，且 source 可选", () => {
       const functions = llmService.getFunctionDefinitions();
       const playMusicFunc = functions.find((f) => f.name === "play_music");
 
       expect(playMusicFunc.parameters.properties).toHaveProperty("source");
       expect(playMusicFunc.parameters.properties).toHaveProperty("query");
-      expect(playMusicFunc.parameters.required).toContain("source");
+
+      const required = playMusicFunc.parameters.required || [];
+      expect(required).not.toContain("source");
     });
   });
 
@@ -143,10 +154,10 @@ describe("LLMService", () => {
     test("应该返回可用的模型列表", () => {
       const models = llmService.getAvailableModels();
 
-      expect(models).toHaveProperty("openai");
       expect(models).toHaveProperty("qwen");
-      expect(models.openai).toContain("gpt-3.5-turbo");
-      expect(models.openai).toContain("gpt-4");
+      expect(models.qwen).toContain("qwen-plus");
+      expect(models.qwen).toContain("qwen-turbo");
+      expect(models.qwen).toContain("qwen-max");
     });
   });
 });

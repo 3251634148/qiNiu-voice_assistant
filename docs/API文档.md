@@ -282,8 +282,8 @@ Message[]  // 消息对象数组
 **参数**
 ```typescript
 {
-  source: 'spotify' | 'apple' | 'local',  // 音乐来源
-  query?: string                           // 搜索查询（可选）
+  source?: 'spotify' | 'apple' | 'local',  // 音乐来源（可选；缺省时自动选择本机可用播放器）
+  query?: string                            // 搜索查询（可选）
 }
 ```
 
@@ -332,7 +332,7 @@ Message[]  // 消息对象数组
 
 1. **参数验证**: 检查参数类型和有效性
 2. **路径安全**: 防止路径遍历攻击
-3. **白名单检查**: 应用程序和目录白名单验证
+3. **范围限制**: 文件操作受允许目录范围限制；应用打开采用“本机已安装检索”而非固定白名单
 4. **风险评估**: 根据操作类型评估风险等级
 5. **用户确认**: 高风险操作需要用户确认
 
@@ -366,7 +366,7 @@ Message[]  // 消息对象数组
 
 - `DASHSCOPE_API_KEY`: 千问大模型API密钥
 - `PORT`: 服务器端口
-- `ALLOWED_APPS`: 允许的应用程序列表
+- `ALLOWED_APPS`: 允许的应用程序列表（历史配置项，当前版本不再用于 open_app）
 - `ALLOWED_DIRECTORIES`: 允许的目录列表
 - `SESSION_TIMEOUT`: 会话超时时间
 - `LOG_LEVEL`: 日志级别

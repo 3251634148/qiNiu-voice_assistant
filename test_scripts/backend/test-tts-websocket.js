@@ -1,4 +1,5 @@
-const TTSService = require("./services/ttsService");
+const TTSService = require("../../backend/services/ttsService");
+require("dotenv").config({ path: "../../backend/.env" });
 
 async function testWebSocketTTS() {
   console.log("开始测试WebSocket TTS服务...");

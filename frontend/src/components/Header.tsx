@@ -1,21 +1,22 @@
-import { RefreshCw, Settings, Trash2, Wifi, WifiOff, Square } from "lucide-react";
+import { Settings, Square, Trash2, Wifi, WifiOff } from "lucide-react";
 import { useState } from "react";
+import { useSocketContext } from "../hooks/SocketProvider";
 import { useApp } from "../hooks/useApp";
-import { useSocket } from "../hooks/useSocket";
 import { SettingsModal } from "./SettingsModal";
 
 export function Header() {
   const { state, clearMessages } = useApp();
-  const { getSystemInfo, cancel, stopSpeaking, clearSession, getSessionHistory } = useSocket() as any;
+  const { cancel, stopSpeaking } = useSocketContext();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const handleClearMessages = () => {
     clearMessages();
   };
 
-  const handleRefreshSystem = () => {
-    getSystemInfo();
-  };
+  // 刷新系统信息与新建对话功能暂时不需要，先保留代码入口占位
+  // const handleRefreshSystem = () => {
+  //   getSystemInfo();
+  // };
 
   const handleOpenSettings = () => {
     setIsSettingsOpen(true);
@@ -30,11 +31,11 @@ export function Header() {
     await stopSpeaking();
   };
 
-  const handleNewSession = () => {
-    clearSession();
-    clearMessages();
-    setTimeout(() => getSessionHistory(50), 200);
-  };
+  // const handleNewSession = () => {
+  //   clearSession();
+  //   clearMessages();
+  //   setTimeout(() => getSessionHistory(50), 200);
+  // };
 
   return (
     <header className="sticky top-0 z-50 bg-white/90 backdrop-blur border-b border-gray-200 px-4 py-3">
@@ -98,7 +99,8 @@ export function Header() {
             <Settings size={18} />
           </button>
 
-          {/* 刷新系统信息 */}
+          {/* 刷新系统信息（暂时注释掉） */}
+          {/*
           <button
             type="button"
             onClick={handleRefreshSystem}
@@ -107,8 +109,10 @@ export function Header() {
           >
             <RefreshCw size={18} />
           </button>
+          */}
 
-          {/* 新建对话 */}
+          {/* 新建对话（暂时注释掉） */}
+          {/*
           <button
             type="button"
             onClick={handleNewSession}
@@ -117,6 +121,7 @@ export function Header() {
           >
             新建
           </button>
+          */}
 
           {/* 清空对话 */}
           <button

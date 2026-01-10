@@ -7,6 +7,7 @@ require("dotenv").config();
 
 const ConversationController = require("./controllers/conversationController");
 const SystemController = require("./services/systemController");
+const ToolRouter = require("./services/toolRouter");
 const logger = require("./utils/logger");
 
 const app = express();
@@ -16,6 +17,10 @@ const io = socketIo(server, {
     origin: "*",
     methods: ["GET", "POST"],
   },
+  pingTimeout: 60000, // 心跳超时时间60秒
+  pingInterval: 25000, // 心跳间隔25秒
+  connectTimeout: 45000, // 连接超时45秒
+  transports: ["websocket", "polling"], // 支持多种传输方式
 });
 
 // 中间件
@@ -26,6 +31,7 @@ app.use(express.static(path.join(__dirname, "../frontend/dist")));
 // 服务实例
 const conversationController = new ConversationController();
 const systemController = new SystemController();
+const toolRouter = new ToolRouter();
 
 // 存储socket连接的映射，用于conversationController
 const socketMap = new Map();
@@ -76,8 +82,8 @@ io.on("connection", (socket) => {
   // 文本命令处理
   socket.on("text-command", async (data) => {
     try {
-      const { text } = data;
-      await conversationController.handleTextCommand(text, socket);
+      const { text, requestId } = data || {};
+      await conversationController.handleTextCommand(text, socket, requestId);
     } catch (error) {
       logger.error("处理文本命令失败:", error);
       socket.emit("error", { message: error.message });
@@ -101,6 +107,46 @@ io.on("connection", (socket) => {
       await conversationController.handleCancel(socket.id, silent);
     } catch (error) {
       logger.error("处理取消失败:", error);
+      socket.emit("error", { message: error.message });
+    }
+  });
+
+  // 停止TTS播放
+  socket.on("stop-tts", () => {
+    try {
+      logger.info(`收到停止TTS请求: ${socket.id}`);
+      conversationController.stopTTS(socket.id);
+    } catch (error) {
+      logger.error("停止TTS失败:", error);
+    }
+  });
+
+  // 停止音乐播放（仅响应前端显式调用，不响应 LLM 工具调用）
+  socket.on("stop-music", async () => {
+    try {
+      // 添加调用来源追踪日志
+      logger.info(`收到停止音乐请求: ${socket.id}`, {
+        source: "frontend-explicit-call",
+        timestamp: new Date().toISOString(),
+      });
+
+      if (!conversationController.isLocalControlAllowed(socket.id)) {
+        socket.emit("assistant-message", {
+          type: "system",
+          content: "本地应用操控已禁用，已忽略停止音乐请求",
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const result = await toolRouter.handleStopMusic({}, { socketId: socket.id });
+      socket.emit("assistant-message", {
+        type: "system",
+        content: result?.message || "音乐已停止",
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      logger.error("停止音乐失败:", error);
       socket.emit("error", { message: error.message });
     }
   });
