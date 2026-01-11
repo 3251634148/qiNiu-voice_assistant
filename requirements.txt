@@ -1,0 +1,3 @@
+# Root requirements is kept as a convenience entrypoint.
+# For backend-only deployment, install from `backend_py/requirements.txt`.
+-r backend_py/requirements.txt

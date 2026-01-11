@@ -44,7 +44,20 @@ export function useSocket() {
 
         // 设置事件监听器 - 只在第一次连接时设置
         socket.onSpeechRecognized((data) => {
-          addMessage("user", data.text);
+          const currentRequestId = activeRequestIdRef.current;
+          const incomingRequestId = (data as any)?.requestId as string | undefined;
+
+          if (incomingRequestId && currentRequestId && incomingRequestId !== currentRequestId) {
+            console.log("忽略旧 speech-recognized", {
+              incomingRequestId,
+              currentRequestId,
+            });
+            return;
+          }
+
+          addMessage("user", data.text, {
+            requestId: incomingRequestId,
+          });
         });
 
         socket.onAssistantMessage((data) => {
@@ -459,11 +472,20 @@ export function useSocket() {
     [getAudioContext, getGainNode, setVoiceState]
   );
 
-  const sendVoiceInput = useCallback((audioData: ArrayBuffer, language?: string) => {
-    if (socketRef.current) {
-      socketRef.current.sendVoiceInput(audioData, language);
-    }
-  }, []);
+  const sendVoiceInput = useCallback(
+    (audioData: ArrayBuffer, language?: string) => {
+      if (socketRef.current) {
+        // stopSpeaking 会短暂拉起 stopAllRef，这里切换到新 requestId 时立刻解除
+        stopAllRef.current = false;
+
+        const requestId = generateRequestId();
+        activeRequestIdRef.current = requestId;
+
+        socketRef.current.sendVoiceInput(audioData, language, requestId);
+      }
+    },
+    []
+  );
 
   const sendTextCommand = useCallback(
     (text: string) => {

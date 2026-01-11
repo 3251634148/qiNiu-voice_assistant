@@ -26,10 +26,18 @@ fi
 
 # 检查环境变量文件
 if [ ! -f "backend/.env" ]; then
-    echo "⚙️  创建环境变量文件..."
-    cp backend/.env.example backend/.env
-    echo "请编辑 backend/.env 文件，填入你的 API 密钥"
-    echo "特别是 OPENAI_API_KEY，这是必需的"
+    echo "⚙️  创建环境变量文件 backend/.env..."
+
+    cat > backend/.env << 'EOF'
+# 本地开发环境变量（请自行填写）
+# Python 后端必需：
+DASHSCOPE_API_KEY=
+
+# 可选：端口覆盖
+PORT=3001
+EOF
+
+    echo "请编辑 backend/.env 文件，填入你的 API 密钥（如 DASHSCOPE_API_KEY）"
     read -p "按回车键继续..."
 fi
 

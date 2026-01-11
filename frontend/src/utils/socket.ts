@@ -86,11 +86,11 @@ class SocketService {
   }
 
   // 发送语音数据
-  sendVoiceInput(audioData: ArrayBuffer, language: string = "zh-CN") {
+  sendVoiceInput(audioData: ArrayBuffer, language: string = "zh-CN", requestId?: string) {
     if (!this.socket) {
       throw new Error("未连接到服务器");
     }
-    this.socket.emit("voice-input", { audioData, language });
+    this.socket.emit("voice-input", { audioData, language, requestId });
   }
 
   // 发送文本命令
