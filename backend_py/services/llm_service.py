@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -16,7 +18,9 @@ class LLMService:
     """DashScope Qwen via OpenAI-compatible API."""
 
     def __init__(self) -> None:
-        if not settings.dashscope_api_key:
+        self.stub_enabled = str(os.getenv("VOICE_ASSISTANT_LLM_STUB", "")).strip().lower() in {"1", "true", "yes"}
+
+        if not self.stub_enabled and not settings.dashscope_api_key:
             raise RuntimeError("千问API密钥未配置，请设置DASHSCOPE_API_KEY环境变量")
 
         self.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -39,8 +43,20 @@ class LLMService:
             "- 如需要澄清，只提出一个关键问题，不要连续追问\n\n"
             "工具与动作说明：\n"
             "- 如果用户是在\"想听你讲故事/讲笑话/念诗/读文章/解释内容\"，这属于对话（ask），不要误判为播放音乐\n"
-            "- 当你判断需要执行操作时：在 INTENT_JSON.actions 里写出动作；必要时也可以同时进行工具调用\n"
-            "- 仅可使用以下工具：play_music、stop_music、open_app、write_article、write_file、send_message、write_run_code、file_control\n"
+            "- 当你判断需要执行操作时：在 INTENT_JSON.actions 里写出动作\n"
+            "- 如果 SAY 里出现\"正在播放/已开始播放/我给你放\"等承诺，INTENT_JSON.actions 必须包含可执行的播放动作；否则不要声称已播放\n"
+            "- 用户要求播放音乐但未指定播放器时，默认使用 play_music(source=\"kugou\")\n"
+            "- 当用户请求播放具体歌曲（例如‘帮我播放周杰伦的告白气球’）时：必须使用 music_ui(player=\"kugou\", action=\"search\", query=...)\n"
+            "  - query 必须是规范化搜索词：去掉礼貌/指令词（如‘帮我/请/麻烦/给我/播放/放/来一首/我想听/我要听’等），并将‘歌手的歌名/歌手-歌名/歌手 歌名’等统一为‘歌手 歌名’（用空格分隔）\n"
+            "  - 禁止把‘帮我播放/请播放/麻烦’之类词语放进 query\n"
+            "- 当用户说‘随便/随机/来点音乐’等泛化请求时，不要把这些词当成歌曲名；应该基于当前的上下文语境，选择一首用户此时可能想听的真实存在的歌名作为 query，并使用 music_ui(player=\"kugou\", action=\"search\", query=...)\n"
+            "- 支持多步任务：当一个目标需要多个步骤（例如先打开应用再发送消息），优先使用 execute_workflow，一次性给出 steps\n"
+            "- 仅可使用以下工具：play_music、music_ui、media_control、stop_music、open_app、write_article、write_file、write_run_code、file_control、run_tests、execute_workflow\n"
+            "- music_ui 用于通过 UI 自动化控制音乐播放器（例如酷狗/Apple Music 的搜索播放、收藏随机播放等）。这是高风险操作，通常需要用户确认\n"
+            "- 当用户明确说‘我喜欢/收藏’并要求‘第一首’时，使用 music_ui(player=\"kugou\", action=\"favorites_first\")\n"
+            "- media_control 用于系统媒体键兜底（播放/暂停、上一首、下一首、音量、当前曲目信息等），通常不需要确认\n"
+            "- send_message（企业微信/飞书/微信等 API）当前不启用，因为密钥信息难以获得\n"
+            "- run_tests 用于在指定工作目录运行单测命令（高风险，通常需要用户确认）\n"
             "- 危险或高风险操作应提示用户确认\n"
             "- stop_music 仅在用户明确要求停止、暂停、关闭音乐时才使用\n\n"
             "回复长度控制：\n"
@@ -52,17 +68,65 @@ class LLMService:
         self.function_definitions: List[Dict[str, Any]] = [
             {
                 "name": "play_music",
-                "description": "播放音乐",
+                "description": "播放音乐（低风险）。支持 kugou（打开应用+媒体键）、apple、spotify；若提供 query，可用于按歌单名播放（Apple Music）。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "source": {
                             "type": "string",
-                            "enum": ["spotify", "apple", "local"],
+                            "enum": ["spotify", "apple", "kugou", "local"],
                             "description": "音乐来源",
                         },
-                        "query": {"type": "string", "description": "搜索的歌曲或艺术家名称（可选）"},
+                        "query": {"type": "string", "description": "歌曲/艺术家/歌单名称（可选）"},
                     },
+                },
+            },
+            {
+                "name": "music_ui",
+                "description": "通过 UI 自动化控制音乐播放器（高风险，需要确认）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "player": {
+                            "type": "string",
+                            "enum": ["kugou", "apple_music"],
+                            "description": "播放器类型",
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["random_favorites", "favorites_first", "playlist", "search"],
+                            "description": "操作类型：收藏随机/我喜欢第一首/指定歌单/搜索播放",
+                        },
+                        "query": {"type": "string", "description": "歌单名或搜索关键词（playlist/search 时需要）"},
+                        "debug": {"type": "boolean", "description": "是否返回调试信息（可选）"},
+                        "dryRun": {"type": "boolean", "description": "只演练不点击（可选）"},
+                    },
+                    "required": ["player", "action"],
+                },
+            },
+            {
+                "name": "media_control",
+                "description": "系统媒体控制兜底（媒体键/音量/当前曲目信息）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "play_pause",
+                                "next",
+                                "previous",
+                                "volume_up",
+                                "volume_down",
+                                "mute",
+                                "get_now_playing",
+                                "set_volume_delta"
+                            ],
+                            "description": "媒体控制动作",
+                        },
+                        "delta": {"type": "number", "description": "音量变化（仅 set_volume_delta 需要，整数）"},
+                    },
+                    "required": ["action"],
                 },
             },
             {
@@ -118,23 +182,6 @@ class LLMService:
                 },
             },
             {
-                "name": "send_message",
-                "description": "发送消息",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "target": {"type": "string", "description": "收件人/目标"},
-                        "content": {"type": "string", "description": "消息内容"},
-                        "channel": {
-                            "type": "string",
-                            "enum": ["auto", "sms", "email", "im"],
-                            "description": "发送渠道",
-                        },
-                    },
-                    "required": ["target", "content"],
-                },
-            },
-            {
                 "name": "write_run_code",
                 "description": "编写并运行代码（高风险，通常需要用户确认）",
                 "parameters": {
@@ -168,7 +215,103 @@ class LLMService:
                     "required": ["operation", "path"],
                 },
             },
+            {
+                "name": "run_tests",
+                "description": "在指定目录运行单测命令（高风险，通常需要用户确认）",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cwd": {"type": "string", "description": "工作目录（必须是允许目录内的绝对路径或相对 home 的路径）"},
+                        "command": {"type": "string", "description": "要执行的测试命令，例如：npm test / pytest"},
+                        "timeoutSec": {"type": "number", "description": "超时时间（秒，可选）"},
+                    },
+                    "required": ["cwd", "command"],
+                },
+            },
+            {
+                "name": "execute_workflow",
+                "description": "执行多步工作流（用于一个目标需要多个动作的场景，例如先打开应用再发送消息）",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string", "description": "步骤工具名"},
+                                    "arguments": {"type": "object", "description": "步骤参数"},
+                                },
+                                "required": ["name"],
+                            },
+                            "description": "步骤列表，按顺序执行",
+                        }
+                    },
+                    "required": ["steps"],
+                },
+            },
         ]
+
+    def _invoke_llm_stub(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        """A deterministic LLM stub for local E2E tests.
+
+        Enabled by env var `VOICE_ASSISTANT_LLM_STUB=1`.
+        """
+
+        last = (messages[-1].get("content") if messages else "") or ""
+        user_text = str(last)
+
+        def _tool_call(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+            now = int(time.time() * 1000)
+            return {
+                "id": f"stub_{name}_{now}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
+            }
+
+        tool_calls: list[dict[str, Any]] = []
+        say = "好的。"
+        intent_actions: list[dict[str, Any]] = []
+
+        if ("我喜欢" in user_text or "喜欢的歌" in user_text) and ("第一首" in user_text or "第一首歌" in user_text):
+            say = "我可以在酷狗打开我喜欢并播放第一首，这需要你确认一下。"
+            args = {"player": "kugou", "action": "favorites_first", "debug": True}
+            tool_calls = [_tool_call("music_ui", args)]
+            intent_actions = [{"name": "music_ui", "arguments": args}]
+
+        elif any(k in user_text for k in ["播放", "帮我播放", "给我放", "我想听", "我要听", "来一首", "来首", "放一首", "放", "听"]):
+            # Best-effort normalization for E2E stability (stub-only).
+            q = user_text
+            for prefix in [
+                "帮我播放",
+                "请播放",
+                "麻烦播放",
+                "给我播放",
+                "我想听",
+                "我要听",
+                "帮我放",
+                "给我放",
+                "播放",
+                "来一首",
+                "来首",
+                "放一首",
+                "放",
+                "听",
+            ]:
+                q = q.replace(prefix, " ")
+            q = q.replace("的", " ")
+            q = " ".join(q.split())
+
+            if q:
+                say = f"我可以用酷狗搜索并播放“{q}”。这需要你确认一下。"
+                args = {"player": "kugou", "action": "search", "query": q, "debug": True}
+                tool_calls = [_tool_call("music_ui", args)]
+                intent_actions = [{"name": "music_ui", "arguments": args}]
+
+        intent_obj = {"mode": "both", "confidence": 0.8, "actions": intent_actions, "reason": "stub"}
+        text = f"INTENT_JSON: {json.dumps(intent_obj, ensure_ascii=False)}\nSAY: {say}"
+
+        return {"text": text, "toolCalls": tool_calls, "model": "stub", "usage": None}
 
     async def invoke_llm(
         self,
@@ -178,6 +321,9 @@ class LLMService:
         tools: Optional[List[Dict[str, Any]]] = None,
         max_tokens: int = 512,
     ) -> Dict[str, Any]:
+        if self.stub_enabled:
+            return self._invoke_llm_stub(messages)
+
         used_model = model or self.model_default
         tool_defs = tools or self.function_definitions
 

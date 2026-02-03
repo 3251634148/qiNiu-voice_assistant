@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,6 +20,34 @@ from backend_py.session_store import SessionStore
 
 
 logger = logging.getLogger("backend_py.controller")
+
+
+RANDOM_SONG_QUERIES = [
+    "周杰伦 告白气球",
+    "陈奕迅 十年",
+    "林俊杰 修炼爱情",
+    "邓紫棋 光年之外",
+    "五月天 倔强",
+    "薛之谦 演员",
+    "王菲 红豆",
+    "孙燕姿 遇见",
+    "张学友 一千个伤心的理由",
+    "李荣浩 年少有为",
+    "周深 大鱼",
+    "朴树 平凡之路",
+]
+
+
+RANDOM_MUSIC_KEYWORDS = [
+    "随便",
+    "随机",
+    "任意",
+    "都行",
+    "听点什么",
+    "听点歌",
+    "来点歌",
+    "来点音乐",
+]
 
 
 class ConversationController:
@@ -319,6 +348,146 @@ class ConversationController:
             )
         return calls
 
+    @staticmethod
+    def _looks_like_playback_claim(text: str) -> bool:
+        t = str(text or "").strip()
+        if not t:
+            return False
+        claims = [
+            "正在为你播放",
+            "正在播放",
+            "我来播放",
+            "我给你播放",
+            "已为你播放",
+            "已开始播放",
+            "我已经给你放",
+            "马上给你放",
+        ]
+        return any(c in t for c in claims)
+
+    @staticmethod
+    def _is_random_music_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+
+        return any(k in t for k in RANDOM_MUSIC_KEYWORDS)
+
+    @staticmethod
+    def _pick_random_song_query() -> str:
+        return random.choice(RANDOM_SONG_QUERIES)
+
+    @staticmethod
+    def _extract_music_search_query(user_text: str) -> Optional[str]:
+        t = str(user_text or "").strip()
+        if not t:
+            return None
+
+        # Guard: stories/jokes/reading are not music playback.
+        if any(x in t for x in ["讲故事", "讲笑话", "念诗", "读文章", "解释"]):
+            return None
+
+        # Guard: random/generic music requests should NOT be treated as a song title query.
+        if ConversationController._is_random_music_request(t):
+            return None
+
+        # Extract quoted titles.
+        if "《" in t and "》" in t:
+            start = t.find("《")
+            end = t.find("》", start + 1)
+            if start >= 0 and end > start:
+                inner = t[start + 1 : end].strip()
+                if inner and inner not in {"音乐", "歌曲", "歌"}:
+                    return inner
+
+        if t.startswith("“") and t.endswith("”") and len(t) >= 4:
+            inner = t[1:-1].strip()
+            if inner and inner not in {"音乐", "歌曲", "歌"}:
+                return inner
+
+        if t.startswith('"') and t.endswith('"') and len(t) >= 4:
+            inner = t[1:-1].strip()
+            if inner and inner not in {"音乐", "歌曲", "歌"}:
+                return inner
+
+        # Remove common leading phrases.
+        for prefix in [
+            "我想听",
+            "我要听",
+            "帮我放",
+            "给我放",
+            "播放",
+            "放",
+            "来一首",
+            "来首",
+            "放一首",
+            "听",
+        ]:
+            if t.startswith(prefix):
+                t = t[len(prefix) :].strip()
+                break
+
+        if not t or t in {"音乐", "歌曲", "歌"}:
+            return None
+
+        # Pattern: "歌手的歌名"
+        m = re.match(r"^(.{1,10})的(.{1,25})$", t)
+        if m:
+            artist = m.group(1).strip()
+            song = m.group(2).strip()
+            if song and song not in {"音乐", "歌曲", "歌"}:
+                return f"{artist} {song}".strip()
+
+        # Filter out known generic phrases (additional safety).
+        generic_phrases = {
+            "来点音乐",
+            "来点歌",
+            "放点歌",
+            "听歌",
+            "听音乐",
+        }
+        if t in generic_phrases:
+            return None
+
+        # If it still looks like a meaningful query.
+        if 2 <= len(t) <= 30:
+            return t
+
+        return None
+
+    @staticmethod
+    def _is_music_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+
+        if any(x in t for x in ["讲故事", "讲笑话", "念诗", "读文章", "解释"]):
+            return False
+
+        keywords = [
+            "听歌",
+            "听音乐",
+            "放歌",
+            "播放音乐",
+            "来点音乐",
+            "来点歌",
+            "放点歌",
+            "播放",
+            "来一首",
+            "来首",
+            "放一首",
+            "听",
+        ]
+        return any(k in t for k in keywords)
+
+    @staticmethod
+    def _make_tool_call(name: str, args: Dict[str, Any], *, prefix: str) -> Dict[str, Any]:
+        now = int(time.time() * 1000)
+        return {
+            "id": f"{prefix}_{now}_{random.randint(1000, 9999)}",
+            "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
+        }
+
     async def handle_text_command(self, *, sid: str, text: Any, request_id: Optional[str]) -> None:
         effective_request_id = request_id.strip() if isinstance(request_id, str) and request_id.strip() else self._gen_request_id(sid)
 
@@ -354,14 +523,145 @@ class ConversationController:
         response_text = parsed.get("sayText") or ""
         intent = self.merge_intent_with_tool_calls(parsed.get("intent"), llm_resp.get("toolCalls"))
 
-        if not response_text.strip() and intent.get("actions"):
+        tool_calls = llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
+        tool_calls_from_intent = [] if tool_calls else self.build_tool_calls_from_intent(intent)
+        selected_tool_calls = tool_calls or tool_calls_from_intent
+
+        fallback_applied = False
+        fallback_reason = None
+
+        # Fallback: avoid "假播放" when the model didn't emit actions.
+        if not selected_tool_calls and self._is_music_request(user_text):
+            if self._is_random_music_request(user_text):
+                q_random = self._pick_random_song_query()
+                response_text = f"我给你随机挑一首歌，用酷狗搜索并播放“{q_random}”。这需要你确认一下。"
+                selected_tool_calls = [
+                    self._make_tool_call(
+                        "music_ui",
+                        {"player": "kugou", "action": "search", "query": q_random},
+                        prefix="fallback_music_ui_random",
+                    )
+                ]
+                fallback_reason = "random_song_search_requires_confirmation"
+            else:
+                q = self._extract_music_search_query(user_text)
+                if q:
+                    response_text = f"我可以用酷狗搜索并播放“{q}”。这需要你确认一下。"
+                    selected_tool_calls = [
+                        self._make_tool_call(
+                            "music_ui",
+                            {"player": "kugou", "action": "search", "query": q},
+                            prefix="fallback_music_ui",
+                        )
+                    ]
+                    fallback_reason = "song_search_requires_confirmation"
+                else:
+                    response_text = "好，我先打开酷狗开始播放。"
+                    selected_tool_calls = [
+                        self._make_tool_call(
+                            "play_music",
+                            {"source": "kugou"},
+                            prefix="fallback_play_music",
+                        )
+                    ]
+                    fallback_reason = "generic_music_default_kugou"
+
+            intent = self.merge_intent_with_tool_calls(intent, selected_tool_calls)
+            fallback_applied = True
+
+        # Force UI automation for specific song queries even if the model picked low-risk play_music.
+        forced_reason = None
+        if selected_tool_calls:
+            first = selected_tool_calls[0] if isinstance(selected_tool_calls, list) else None
+            fn = first.get("function") if isinstance(first, dict) else None
+            first_name = fn.get("name") if isinstance(fn, dict) else first.get("name") if isinstance(first, dict) else None
+            args_raw = fn.get("arguments") if isinstance(fn, dict) else first.get("arguments") if isinstance(first, dict) else None
+
+            args_obj: Dict[str, Any] = {}
+            if isinstance(args_raw, str):
+                try:
+                    args_obj = json.loads(args_raw)
+                except Exception:
+                    args_obj = {}
+            elif isinstance(args_raw, dict):
+                args_obj = args_raw
+
+            # 1) If user asks for random music but model only opened KuGou, upgrade to UI search with a real song.
+            if forced_reason is None and first_name == "play_music" and self._is_music_request(user_text):
+                src = str(args_obj.get("source") or "").strip().lower()
+                if src in {"", "kugou"} and self._is_random_music_request(user_text):
+                    q_random = self._pick_random_song_query()
+                    response_text = f"我给你随机挑一首歌，用酷狗搜索并播放“{q_random}”。这需要你确认一下。"
+                    selected_tool_calls = [
+                        self._make_tool_call(
+                            "music_ui",
+                            {"player": "kugou", "action": "search", "query": q_random},
+                            prefix="force_music_ui_random",
+                        )
+                    ]
+                    intent = self.merge_intent_with_tool_calls(intent, selected_tool_calls)
+                    forced_reason = "force_music_ui_for_random_request"
+
+            # 2) If model chose low-risk play_music but also provided a search query, upgrade to UI search.
+            # NOTE: We do NOT attempt to hardcode-parse user text here; query normalization should be done by LLM.
+            if forced_reason is None and first_name == "play_music" and self._is_music_request(user_text):
+                src = str(args_obj.get("source") or "").strip().lower()
+                q_from_model = str(args_obj.get("query") or "").strip()
+                if src in {"", "kugou"} and q_from_model:
+                    response_text = f"我可以用酷狗搜索并播放“{q_from_model}”。这需要你确认一下。"
+                    selected_tool_calls = [
+                        self._make_tool_call(
+                            "music_ui",
+                            {"player": "kugou", "action": "search", "query": q_from_model},
+                            prefix="force_music_ui",
+                        )
+                    ]
+                    intent = self.merge_intent_with_tool_calls(intent, selected_tool_calls)
+                    forced_reason = "force_music_ui_for_song_query_from_model"
+
+            # Favorites first: user explicitly asks "我喜欢 ... 第一首"
+            if forced_reason is None:
+                t = str(user_text or "")
+                if ("我喜欢" in t or "喜欢的歌" in t or "我喜爱" in t) and ("第一首" in t or "第一首歌" in t):
+                    response_text = "我可以在酷狗打开“我喜欢”并播放第一首。这需要你确认一下。"
+                    selected_tool_calls = [
+                        self._make_tool_call(
+                            "music_ui",
+                            {"player": "kugou", "action": "favorites_first"},
+                            prefix="force_music_ui",
+                        )
+                    ]
+                    intent = self.merge_intent_with_tool_calls(intent, selected_tool_calls)
+                    forced_reason = "force_music_ui_favorites_first"
+
+        if forced_reason:
+            logger.info(
+                "force tool override: requestId=%s reason=%s userText=%s",
+                effective_request_id,
+                forced_reason,
+                user_text,
+            )
+            fallback_applied = True
+            fallback_reason = forced_reason
+
+        # If we still have no actions, ensure we don't claim playback.
+        if not selected_tool_calls and self._looks_like_playback_claim(response_text):
+            response_text = "我还没开始播放。你想听什么歌？或者直接说“播放音乐”。"
+
+        if not response_text.strip() and (intent or {}).get("actions"):
             response_text = "好呀，我来处理。"
 
         self.session_store.add_message(
             sid,
             msg_type="assistant",
             content=response_text,
-            metadata={"toolCalls": llm_resp.get("toolCalls"), "intent": intent, "model": llm_resp.get("model"), "usage": llm_resp.get("usage")},
+            metadata={
+                "toolCalls": llm_resp.get("toolCalls"),
+                "intent": intent,
+                "model": llm_resp.get("model"),
+                "usage": llm_resp.get("usage"),
+                "fallback": {"applied": fallback_applied, "reason": fallback_reason},
+            },
         )
 
         if response_text.strip():
@@ -377,14 +677,8 @@ class ConversationController:
                 to=sid,
             )
 
-        tool_calls = llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
-        if tool_calls:
-            await self.handle_tool_calls(sid=sid, tool_calls=tool_calls)
-            return
-
-        tool_calls_from_intent = self.build_tool_calls_from_intent(intent)
-        if tool_calls_from_intent:
-            await self.handle_tool_calls(sid=sid, tool_calls=tool_calls_from_intent)
+        if selected_tool_calls:
+            await self.handle_tool_calls(sid=sid, tool_calls=selected_tool_calls)
             return
 
         # TTS streaming

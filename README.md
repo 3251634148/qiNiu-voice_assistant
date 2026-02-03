@@ -32,6 +32,13 @@ cd backend
 npm run dev
 ```
 
+（可选）仅启动 Python 后端（`backend_py/`，用于同协议替换/本地自动化能力）：
+```bash
+# 建议 Python 3.11
+source backend_py/.venv/bin/activate
+uvicorn backend_py.main:asgi_app --host 0.0.0.0 --port 3001
+```
+
 ### 环境变量配置
 
 在 `backend/.env` 文件中配置以下变量：
@@ -41,7 +48,10 @@ npm run dev
 NODE_ENV=development
 PORT=3001
 
-# OpenAI API（必需）
+# DashScope（千问）：LLM/TTS/ASR（Python 后端与部分 Node 路径会用到）
+DASHSCOPE_API_KEY=your_dashscope_api_key_here
+
+# OpenAI（历史依赖，是否生效以实际运行路径为准）
 OPENAI_API_KEY=your_openai_api_key_here
 
 # 语音识别服务（可选）
@@ -56,6 +66,9 @@ AZURE_SPEECH_ENDPOINT=your_azure_speech_endpoint
 GOOGLE_TTS_API_KEY=your_google_tts_api_key
 BAIDU_TTS_API_KEY=your_baidu_tts_api_key
 BAIDU_TTS_SECRET_KEY=your_baidu_tts_secret_key
+
+# 调试产物 runId（可选）：用于把 ui_debug 产物落盘到固定目录
+VOICE_ASSISTANT_DEBUG_RUN=debug_run_$(date +%s)
 ```
 
 ## 项目结构
@@ -232,6 +245,49 @@ tail -f backend/logs/combined.log
 # 查看错误日志
 tail -f backend/logs/error.log
 ```
+
+### KuGou UI 自动化排障（坐标映射步骤3）
+
+当出现“OCR 识别到了文字但点击点不中/点歪”时，可先用 round-trip 验证脚本证伪是否为坐标映射问题（ROI offset / OCR scale 回缩 / y 轴翻转 / Retina points↔pixels 比例等）。
+
+- **脚本**：`test_scripts/debug_kugou_coord_roundtrip.py`
+- **产物目录**：`~/Documents/VoiceAssistant/ui_debug/<VOICE_ASSISTANT_DEBUG_RUN>/`
+  - `coord_roundtrip_*.json`：包含 image→screen→image 的误差统计与 OCR 命中信息
+  - `coord_roundtrip_*.png`：把 OCR 框与测试点画回整图，便于人工核对
+
+运行（默认 dry-run，不执行点击）：
+```bash
+VOICE_ASSISTANT_DEBUG_RUN=coord_roundtrip_$(date +%s) backend_py/.venv/bin/python test_scripts/debug_kugou_coord_roundtrip.py
+```
+
+可选：开启真实点击验证（高风险，谨慎使用）：
+```bash
+VOICE_ASSISTANT_DEBUG_RUN=coord_roundtrip_click_$(date +%s) backend_py/.venv/bin/python test_scripts/debug_kugou_coord_roundtrip.py --do-click
+```
+
+### KuGou UI 自动化排障脚本索引（摘要）
+
+- **OCR 评测 / anchor dry-run**：`test_scripts/debug_ocr_vision_kugou.py`
+  - 用于评估 Vision OCR 对关键字（音乐/我的/取消/单曲/歌单/综合…）的命中；或只做锚点识别→计算理论点击点→输出标注（不点击）。
+- **搜索入口定位排障**：`test_scripts/debug_kugou_search_entry_locator.py`
+  - 用于验证“顶部搜索框 placeholder 很浅/低对比度”导致 OCR 不稳时，ROI/scale 调参的对照输出。
+- **坐标映射 round-trip 证伪（步骤3）**：`test_scripts/debug_kugou_coord_roundtrip.py`
+  - 用于验证窗口截图坐标↔屏幕点击坐标的双向换算是否自洽，排除 ROI offset/scale 回缩/y 翻转/Retina 比例等系统性偏移。
+- **E2E（Socket.IO）链路验证**：`test_scripts/test_e2e_socketio_music_flow.py`
+  - 用于在不依赖真实前端交互的情况下，跑“确认→工具执行→产物落盘”的端到端回归，并输出 `ui_debug/<requestId>/` 索引。
+
+### TTS 停止/打断排障（摘要）
+
+- **关键机制**：前端应保证全局只有一份音频播放控制面（例如通过 `SocketProvider` 单例化 `useSocket()`），并通过 `requestId` 丢弃旧请求“晚到音频”。
+- **快速定位**：若“点击停止后仍继续播放”，优先检查：
+  - 是否存在多个 `useSocket()` 实例分别持有不同的 `AudioContext`/队列；
+  - 后端是否支持 `stop-tts`/cancel 并停止继续下发 `audio-chunk`；
+  - 是否使用“静音闸（GainNode）”实现瞬时静音，避免队列中残留音频继续播完。
+
+### 低延迟流式与工具兜底（摘要）
+
+- **低延迟模式**通常用于闲聊类快速出声；明确的本地控制指令应进入工具模式，避免“只说不做”。
+- 若出现“工具未执行但口头说已执行”，建议在后端增加“进入工具模式但模型未给出动作时的兜底意图解析/纠偏”，并将真实执行结果通过 `tool-result` 与 `ui_debug` 证据落盘。
 
 ## 贡献指南
 
