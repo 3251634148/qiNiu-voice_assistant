@@ -4,9 +4,9 @@ from typing import Any
 
 
 def setup_logging(level: int = logging.INFO) -> None:
-    """Configure basic structured-ish logging.
+    """配置基础日志输出格式（结构化风格）。
 
-    The Node backend uses a logger module; in Python we keep it simple but consistent.
+    Node 后端有统一的 logger 模块；Python 侧保持简单，但输出格式尽量一致，便于排障。
     """
 
     handler = logging.StreamHandler(sys.stdout)
@@ -22,14 +22,14 @@ def setup_logging(level: int = logging.INFO) -> None:
     root.addHandler(handler)
     root.setLevel(level)
 
-    # Reduce noisy libs
+    # 降低第三方库噪声日志
     logging.getLogger("uvicorn").setLevel(level)
     logging.getLogger("uvicorn.error").setLevel(level)
     logging.getLogger("uvicorn.access").setLevel(level)
 
 
 def log_extra(**kwargs: Any) -> str:
-    """Render extra fields in a compact key=value string."""
+    """将额外字段渲染为紧凑的 key=value 字符串（用于日志附加信息）。"""
 
     parts = []
     for k, v in kwargs.items():

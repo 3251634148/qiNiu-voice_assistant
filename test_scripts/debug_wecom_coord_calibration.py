@@ -97,10 +97,10 @@ def _infer_global_max_y_sync() -> Optional[dict[str, Any]]:
 
 
 def _pick_screen_by_index(screens: list[dict[str, Any]], screen_index: int) -> dict[str, Any]:
-    """Pick a screen item by its `index`.
+    """根据 `index` 选取屏幕项。
 
-    Notes
-    - `index` may be 0, so we must NOT use `or` as a fallback.
+    注意
+    - `index` 可能是 0，所以不能用 `or` 做 fallback。
     """
 
     for s in screens:
@@ -143,7 +143,7 @@ def _to_wecom_local_from_event(
     screen_frame: dict[str, Any],
     global_max_y: float,
 ) -> dict[str, float]:
-    """Convert Quartz event-space coords -> single-screen bottom-left coords."""
+    """将 Quartz event-space 坐标转换为单屏左下角原点坐标。"""
 
     fx = float(screen_frame.get('x') or 0.0)
     fy = float(screen_frame.get('y') or 0.0)
@@ -287,7 +287,7 @@ async def main() -> None:
     out_path = _debug_dir() / f'wecom_coord_calib_{_now_ms()}.json'
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
 
-    # Console summary
+    # 控制台汇总
     print('saved:', out_path)
     print('globalMaxYUsed:', payload['globalMaxYUsed'])
     print('mouse(event):', after_event)

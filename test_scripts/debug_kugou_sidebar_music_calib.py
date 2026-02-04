@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""KuGou sidebar "音乐" click calibration.
+"""酷狗左侧栏"音乐"点击校准脚本。
 
 目的
 - 用网格扫描左侧栏区域：逐点点击 -> 截图 -> OCR 判定页面是否进入音乐主界面。
-- 为“点击音乐入口误入视频/MV”问题提供可复现证据，并输出可用的确定性点位。
+- 为"点击音乐入口误入视频/MV"问题提供可复现证据，并输出可用的确定性点位。
 
 输出
 - 所有截图与结果 JSON 会落在：~/Documents/VoiceAssistant/ui_debug/<run_id>/
@@ -14,7 +14,7 @@
 - VOICE_ASSISTANT_DEBUG_RUN=calib_kugou_sidebar_$(date +%s) backend_py/.venv/bin/python test_scripts/debug_kugou_sidebar_music_calib.py --cursor-shot
 
 说明
-- 该脚本会进行真实点击（高风险）。请确保已授予“辅助功能/屏幕录制”权限且酷狗窗口可见。
+- 该脚本会进行真实点击（高风险）。请确保已授予"辅助功能/屏幕录制"权限且酷狗窗口可见。
 """
 
 from __future__ import annotations
@@ -42,32 +42,32 @@ def _now_ms() -> int:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Calibrate KuGou sidebar "音乐" click points')
+    parser = argparse.ArgumentParser(description='酷狗左侧栏"音乐"点击校准')
     parser.add_argument(
         '--run-id',
         default='',
-        help='If provided and VOICE_ASSISTANT_DEBUG_RUN is empty, set it to this value.',
+        help='如果提供了且 VOICE_ASSISTANT_DEBUG_RUN 为空，则使用该值作为 run_id。',
     )
     parser.add_argument(
         '--sleep-ms',
         type=int,
         default=320,
-        help='Delay after click in milliseconds (default: 320)',
+        help='点击后的等待时间，单位毫秒（默认 320）',
     )
     parser.add_argument(
         '--cursor-shot',
         action='store_true',
-        help='After each click, capture a full-screen screenshot with cursor for verification.',
+        help='每次点击后，抓一张带光标的全屏截图用于验证。',
     )
     parser.add_argument(
         '--x',
         default='0.03,0.05,0.07,0.09,0.11',
-        help='Comma-separated x_ratio grid values (0..1) (default scans left sidebar).',
+        help='逗号分隔的 x_ratio 网格值（0..1），默认扫描左侧栏区域。',
     )
     parser.add_argument(
         '--y',
         default='0.28,0.31,0.34,0.37,0.40,0.43,0.46,0.49,0.52',
-        help='Comma-separated y_ratio_from_top grid values (0..1) (default scans around sidebar icons).',
+        help='逗号分隔的 y_ratio_from_top 网格值（0..1），默认扫描侧边栏图标区域。',
     )
     return parser.parse_args()
 
@@ -102,7 +102,7 @@ async def _bring_kugou_front(ui: MacOSUIAutomation) -> None:
 
 
 async def _detect_mode(ui: MacOSUIAutomation, screenshot_path: str) -> str:
-    """Best-effort classify current page mode by OCR on top tabs area."""
+    """通过顶部标签栏 OCR 判断当前页面模式（尽力判断）。"""
 
     roi_top = (0.12, 0.00, 0.88, 0.22)
     boxes = await ui.ocr_screenshot_advanced(
@@ -204,7 +204,7 @@ async def main() -> int:
     out_path = base / f'sidebar_music_calib_{_now_ms()}.json'
     out_path.write_text(json.dumps({'results': results}, ensure_ascii=False, indent=2), encoding='utf-8')
 
-    # Print a compact summary for quick grep.
+    # 输出一份简洁的汇总，方便快速查看命中结果。
     hits = [
         {
             'index': r.get('index'),

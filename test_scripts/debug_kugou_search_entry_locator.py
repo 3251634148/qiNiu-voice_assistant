@@ -39,8 +39,8 @@ from backend_py.services.macos_ui_automation import MacOSUIAutomation
 
 KUGOU_APP_NAMES = ["酷狗音乐", "KugouMusic", "Kugou Music"]
 TOP_SEARCH_ROI = (0.18, 0.0, 0.78, 0.16)
-# A tighter ROI around the search bar text area (top-right).
-# This is intentionally narrower than TOP_SEARCH_ROI to reduce OCR noise from tabs/cards.
+# 收紧的搜索框文本区域 ROI（右上角）。
+# 故意比 TOP_SEARCH_ROI 窄，以减少 tabs/cards 带来的 OCR 干扰。
 SEARCH_BAR_ROI = (0.60, 0.00, 0.36, 0.12)
 
 
@@ -156,8 +156,8 @@ async def _run(args: argparse.Namespace) -> None:
         _save_cgimage_png(crop, out_path=out_img)
         crop_paths[name] = str(out_img)
 
-    # NOTE: In current KuGou UI, the placeholder "搜索" can be low-contrast.
-    # We validate both a broad ROI (top_search) and a tight ROI (search_bar).
+    # 注意：当前酷狗 UI 中 placeholder "搜索"对比度较低。
+    # 我们同时验证宽 ROI（top_search）和窄 ROI（search_bar）。
     roi_configs = {
         "top_search": [
             {"scale": 1.0, "grayscale": True, "accurate": False},
@@ -165,7 +165,7 @@ async def _run(args: argparse.Namespace) -> None:
             {"scale": 2.4, "grayscale": False, "accurate": False},
         ],
         "search_bar": [
-            # Empirically better for low-contrast placeholder text.
+            # 经验证，低对比度 placeholder 文本用这个配置效果更好。
             {"scale": 3.2, "grayscale": True, "accurate": False},
             {"scale": 3.2, "grayscale": False, "accurate": False},
         ],

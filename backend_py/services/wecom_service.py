@@ -16,14 +16,14 @@ class WeComToken:
 
 
 class WeComService:
-    """Enterprise WeChat (WeCom/企业微信) API client.
+    """企业微信（WeCom）API 客户端。
 
-    This service is intended for *stable* automation tasks. It uses the official API:
+    该服务用于相对稳定的自动化任务，调用官方接口：
     - gettoken
-    - message/send (app message)
-    - appchat/send (group chat by chatid)
+    - message/send（应用消息）
+    - appchat/send（群聊 chatid 消息）
 
-    Required env:
+    必需环境变量：
     - WECOM_CORP_ID
     - WECOM_CORP_SECRET
     - WECOM_AGENT_ID
@@ -75,7 +75,7 @@ class WeComService:
         if not token:
             raise RuntimeError("企业微信 gettoken 未返回 access_token")
 
-        # refresh 60s earlier
+        # 提前 60 秒刷新 token，避免临界过期导致请求失败
         self._token = WeComToken(access_token=token, expires_at=now + max(60, expires_in - 60))
         return token
 
@@ -86,15 +86,15 @@ class WeComService:
         target: str,
         content: str,
     ) -> Dict[str, Any]:
-        """Send a text message.
+        """发送文本消息。
 
-        Args:
+        参数：
             target_type: user | party | tag | chat
-            target: the actual id
-            content: message content
+            target: 对应的目标 id
+            content: 消息内容
 
-        Returns:
-            Dict with wecom response fields.
+        返回：
+            包含企业微信响应字段的字典。
         """
 
         token = await self._get_access_token()

@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-# Ensure project root is on sys.path so `backend_py` can be imported when running from `test_scripts/`.
+# 确保以脚本方式运行时能导入项目根目录下的 backend_py 模块。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -127,10 +127,10 @@ def _save_cgimage_png(cgimage: Any, *, out_path: Path) -> None:
 
 
 def _pick_title_anchor(boxes: list[Any]) -> Optional[dict[str, Any]]:
-    """Pick a title-like anchor box (top-left-ish) within a panel ROI.
+    """从遮挡窗口 ROI 内选取一个"标题锚点"框（靠左上的文本框）。
 
-    We no longer rely on OCR recognizing the back icon (< / ←). Instead, we anchor on any visible title text
-    in the panel header and click to its left.
+    不再依赖 OCR 识别返回图标（< / ←），而是找到 panel 头部任意可见的标题文本，
+    然后点击其左侧来触发返回。
     """
 
     def _norm(value: str) -> str:
@@ -192,7 +192,7 @@ async def _run(args: argparse.Namespace) -> None:
 
     cg, w, h = _load_cgimage(image_path)
 
-    # Candidate panel tops (normalized ROI)
+    # 候选遮挡窗口顶部 ROI（归一化坐标）
     rois = {
         "right_small_panel_top": (0.42, 0.0, 0.58, 0.18),
         "large_panel_top": (0.18, 0.0, 0.82, 0.18),

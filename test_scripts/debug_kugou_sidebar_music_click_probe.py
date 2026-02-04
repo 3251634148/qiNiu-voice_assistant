@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Probe KuGou sidebar "音乐" click accuracy and search entry reachability.
+"""酷狗左侧栏"音乐"点击精准度验证与搜索入口可达性探测。
 
 目的
-- 用脚本验证：当前后端 UI 自动化是否能稳定点击到左侧栏“音乐”入口（避免误点到“视频/MV”页）。
-- 在进入音乐主界面后，验证是否能点击到顶部搜索输入框/进入搜索态（出现“取消/历史搜索”）。
+- 用脚本验证：当前后端 UI 自动化是否能稳定点击到左侧栏"音乐"入口（避免误点到"视频/MV"页）。
+- 在进入音乐主界面后，验证是否能点击到顶部搜索输入框/进入搜索态（出现"取消/历史搜索"）。
 
 输出
 - 所有截图与结果 JSON 会落在：~/Documents/VoiceAssistant/ui_debug/<run_id>/
@@ -14,7 +14,7 @@
 - VOICE_ASSISTANT_DEBUG_RUN=probe_kugou_sidebar_$(date +%s) python test_scripts/debug_kugou_sidebar_music_click_probe.py --cursor-shot
 
 说明
-- 该脚本会进行真实点击（高风险）。请确保已授予“辅助功能/屏幕录制”权限，且酷狗窗口可见。
+- 该脚本会进行真实点击（高风险）。请确保已授予"辅助功能/屏幕录制"权限，且酷狗窗口可见。
 """
 
 from __future__ import annotations
@@ -54,27 +54,27 @@ def _now_ms() -> int:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Probe KuGou sidebar "音乐" click point accuracy')
+    parser = argparse.ArgumentParser(description='酷狗左侧栏"音乐"点击精准度探测')
     parser.add_argument(
         '--run-id',
         default='',
-        help='If provided and VOICE_ASSISTANT_DEBUG_RUN is empty, set it to this value.',
+        help='如果提供了且 VOICE_ASSISTANT_DEBUG_RUN 为空，则使用该值作为 run_id。',
     )
     parser.add_argument(
         '--cursor-shot',
         action='store_true',
-        help='After each click, capture a full-screen screenshot with cursor for verification.',
+        help='每次点击后，抓一张带光标的全屏截图用于验证。',
     )
     parser.add_argument(
         '--sleep-ms',
         type=int,
         default=320,
-        help='Delay after click steps in milliseconds (default: 320)',
+        help='点击操作后的等待时间，单位毫秒（默认 320）',
     )
     parser.add_argument(
         '--offsets',
         default='0,0;0,-80;0,-60;0,-40;-60,0;-60,-40;-40,-40;-40,0;-40,-20',
-        help='Semicolon-separated dx,dy offsets in IMAGE PIXELS applied to the OCR box center.',
+        help='分号分隔的 dx,dy 偏移量列表，单位是图像像素，应用于 OCR 框中心。',
     )
     return parser.parse_args()
 
@@ -112,7 +112,7 @@ async def _bring_kugou_front(ui: MacOSUIAutomation) -> None:
 
 
 async def _detect_mode(ui: MacOSUIAutomation, screenshot_path: str) -> str:
-    """Best-effort classify current page mode by OCR on top tabs area."""
+    """通过顶部标签栏 OCR 判断当前页面模式（尽力判断）。"""
 
     roi_top = (0.12, 0.00, 0.88, 0.22)
     boxes = await ui.ocr_screenshot_advanced(
@@ -147,7 +147,7 @@ def _pick_music_box(boxes: List[OcrBox]) -> Optional[OcrBox]:
     if not candidates:
         return None
 
-    # Prefer higher confidence + larger area
+    # 优先选置信度高 + 面积大的框
     return max(candidates, key=lambda b: (float(b.confidence), float(b.width) * float(b.height)))
 
 
@@ -156,7 +156,7 @@ async def _find_sidebar_music_anchor(ui: MacOSUIAutomation, cap: Dict[str, Any])
     if not path:
         raise RuntimeError('missing screenshotPath')
 
-    # Use the same OCR preset used by production, but apply a sidebar ROI.
+    # 使用与生产环境相同的 OCR 配置，但应用侧边栏 ROI。
     boxes = await ui.ocr_screenshot_advanced(
         path,
         roi=KUGOU_ROIS['sidebar'],
@@ -171,7 +171,7 @@ async def _find_sidebar_music_anchor(ui: MacOSUIAutomation, cap: Dict[str, Any])
     picked = _pick_music_box(boxes)
     if picked is None:
         preview = [getattr(b, 'text', '') for b in sorted(boxes, key=lambda x: x.confidence, reverse=True)[:20]]
-        raise RuntimeError(f'未在侧边栏 ROI 内找到“音乐”文本（preview={preview}）')
+        raise RuntimeError(f'未在侧边栏 ROI 内找到"音乐"文本（preview={preview}）')
 
     meta = {
         'picked': {
@@ -194,7 +194,7 @@ async def _try_enter_search(ui: MacOSUIAutomation, cap: Dict[str, Any]) -> Dict[
     if iw <= 1 or ih <= 1:
         raise RuntimeError('missing imageSize')
 
-    # Deterministic click point inside search_bar ROI (mirrors music_controller fallback).
+    # 搜索栏 ROI 内的确定性点击点（与 music_controller 的 fallback 逻辑一致）。
     x0, y0, w, h = KUGOU_ROIS['search_bar']
     x_norm = float(x0) + float(w) * 0.78
     y_norm = float(y0) + float(h) * 0.55
@@ -376,7 +376,7 @@ async def main() -> int:
     out_path = base / f'sidebar_music_click_probe_{_now_ms()}.json'
     out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
 
-    # Print a compact summary.
+    # 输出简洁汇总。
     compact = [
         {
             'idx': r.index,

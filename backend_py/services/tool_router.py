@@ -34,7 +34,7 @@ class ToolRouter:
             {
                 "name": "music_ui",
                 "description": "通过 UI 自动化控制音乐播放器（需要确认）",
-                "parameters": ["player", "action", "query", "debug", "dryRun"],
+                "parameters": ["player", "action", "query", "pickMode", "debug", "dryRun"],
             },
             {
                 "name": "media_control",
@@ -68,7 +68,7 @@ class ToolRouter:
             if lowered.startswith(prefix):
                 return (target_type, t[len(prefix) :].strip())
 
-        # default to user
+        # 默认按 user 处理
         return ("user", t)
 
     @staticmethod
@@ -83,7 +83,7 @@ class ToolRouter:
         tool_call_id = tool_call.get("id")
         ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-        # Per-request debug directory routing.
+        # 按 requestId/runId 路由调试产物目录（ui_debug/<runId>/）。
         session = context.get("session")
         run_id = None
         try:
@@ -135,6 +135,7 @@ class ToolRouter:
                     player=args.get("player"),
                     action=args.get("action"),
                     query=args.get("query"),
+                    pick_mode=args.get("pickMode"),
                     debug=bool(args.get("debug") is True),
                     dry_run=bool(args.get("dryRun") is True),
                 )
@@ -334,7 +335,7 @@ class ToolRouter:
                 cmd = str(args.get("command") or "").strip()
                 timeout_sec = float(args.get("timeoutSec") or 120)
 
-                # Align with FileWriter behavior: allow home-relative paths
+                # 与 FileWriter 行为对齐：允许使用 home 相对路径
                 cwd_path = Path(cwd)
                 resolved = str(cwd_path if cwd_path.is_absolute() else (Path.home() / cwd_path))
 
@@ -376,7 +377,7 @@ class ToolRouter:
                         "timestamp": ts,
                     }
 
-                # Execute
+                # 执行代码
                 if language == "python":
                     cmd = f"python {file_path.name}"
                     cwd = str(base_dir)
@@ -384,7 +385,7 @@ class ToolRouter:
                     cmd = f"node {file_path.name}"
                     cwd = str(base_dir)
                 else:
-                    # bash
+                    # bash 脚本
                     cmd = f"bash {file_path.name}"
                     cwd = str(base_dir)
 

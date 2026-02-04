@@ -17,7 +17,7 @@ class Session:
     last_activity: datetime = field(default_factory=datetime.utcnow)
     context: Dict[str, Any] = field(default_factory=dict)
 
-    # runtime flags
+    # 运行时标志位
     tts_settings: Dict[str, Any] = field(default_factory=dict)
     allow_local_control: Optional[bool] = None
     tts_stopped: bool = False
@@ -25,7 +25,7 @@ class Session:
 
 
 class SessionStore:
-    """In-memory session store aligned with backend/utils/sessionStore.js."""
+    """内存会话存储（与 backend/utils/sessionStore.js 行为对齐）。"""
 
     def __init__(self) -> None:
         self._sessions: Dict[str, Session] = {}
@@ -110,7 +110,7 @@ class SessionStore:
                     session.pending_confirmation = None
                     return None
             except Exception:
-                # If parsing fails, do not block user.
+                # 若解析失败，为避免误伤用户，这里不阻断请求。
                 pass
         return session.pending_confirmation
 

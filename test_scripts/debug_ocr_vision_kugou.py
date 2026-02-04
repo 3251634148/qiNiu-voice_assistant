@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-# Ensure project root is on sys.path so `backend_py` can be imported when running from `test_scripts/`.
+# 确保以脚本方式运行时能导入项目根目录下的 backend_py 模块。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -50,7 +50,7 @@ KUGOU_APP_NAMES = ["酷狗音乐", "KugouMusic", "Kugou Music"]
 class OcrBox:
     text: str
     confidence: float
-    # image coords (origin top-left)
+    # 图像坐标（原点左上角）
     x: float
     y: float
     width: float
@@ -70,10 +70,10 @@ def _now_ms() -> int:
 
 
 def _import_vision() -> None:
-    """Ensure Vision/Quartz/Cocoa imports work.
+    """检查 Vision/Quartz/Cocoa 导入是否可用。
 
-    Note: This script intentionally does NOT require `pyobjc-framework-CoreImage`.
-    Some environments only ship Vision/Quartz/Cocoa, and we can still do useful OCR evaluation.
+    注意：该脚本故意不依赖 `pyobjc-framework-CoreImage`。
+    有些环境只装了 Vision/Quartz/Cocoa，依然能做 OCR 评测。
     """
 
     try:
@@ -88,9 +88,9 @@ def _import_vision() -> None:
 
 
 def _load_cgimage(image_path: str) -> tuple[Any, float, float]:
-    """Load image into CGImage and return (cgimage, width, height).
+    """加载图片为 CGImage 并返回 (cgimage, width, height)。
 
-    Use Quartz ImageIO instead of `NSImage.CGImageForProposedRect...` to avoid PyObjC signature differences.
+    使用 Quartz ImageIO 而不是 `NSImage.CGImageForProposedRect...`，以避免 PyObjC 签名差异。
     """
 
     _import_vision()
@@ -113,7 +113,7 @@ def _load_cgimage(image_path: str) -> tuple[Any, float, float]:
 
 
 def _crop_cgimage(cgimage: Any, *, w: float, h: float, roi: tuple[float, float, float, float]) -> Any:
-    """Crop CGImage by normalized ROI (x, y, width, height) with origin top-left."""
+    """按归一化 ROI (x, y, width, height) 裁剪 CGImage，原点在左上角。"""
 
     from Quartz import CGImageCreateWithImageInRect
 
@@ -128,9 +128,9 @@ def _crop_cgimage(cgimage: Any, *, w: float, h: float, roi: tuple[float, float, 
     ww = float(rw) * float(w)
     hh = float(rh) * float(h)
 
-    # Quartz uses bottom-left origin for CGRect in some contexts; however CGImageCreateWithImageInRect
-    # treats rect in image space with origin at top-left for CGImage when used with pixel-based coords.
-    # In practice for our PNG captures, using top-left coords works with this cropping.
+    # Quartz 的 CGRect 某些场景用左下角原点；但 CGImageCreateWithImageInRect
+    # 在处理 CGImage 像素坐标时用左上角原点。
+    # 实际测试中，对 PNG 截图用左上角坐标做裁剪是对的。
     rect = ((x, y), (ww, hh))
     cropped = CGImageCreateWithImageInRect(cgimage, rect)
     if cropped is None:
@@ -144,12 +144,12 @@ def _preprocess_cg(
     scale: float = 2.0,
     grayscale: bool = True,
 ) -> Any:
-    """Lightweight preprocessing using Quartz/CoreGraphics only.
+    """仅用 Quartz/CoreGraphics 做简单预处理。
 
-    - Scale up to help small-font OCR
-    - Optional grayscale to reduce color noise
+    - 放大：帮助小字体 OCR
+    - 可选灰度：减少颜色干扰
 
-    We do not do contrast/sharpen here because CoreImage isn't guaranteed installed.
+    这里不做对比度/锐化，因为 CoreImage 不保证装了。
     """
 
     from Quartz import (
@@ -213,7 +213,7 @@ def _vision_ocr(
     min_text_height: Optional[float] = None,
     custom_words: Optional[list[str]] = None,
 ) -> list[OcrBox]:
-    """Run Vision OCR on a CGImage and return boxes in top-left image coordinates."""
+    """对 CGImage 执行 Vision OCR，返回左上角原点图像坐标的框列表。"""
 
     from Vision import VNImageRequestHandler, VNRecognizeTextRequest
 
@@ -225,7 +225,7 @@ def _vision_ocr(
 
     req = VNRecognizeTextRequest.alloc().initWithCompletionHandler_(_handler)
 
-    # recognitionLevel: 0=fast, 1=accurate
+    # recognitionLevel: 0=快速, 1=精准
     req.setRecognitionLevel_(1 if accurate else 0)
     req.setUsesLanguageCorrection_(bool(language_correction))
 
@@ -253,7 +253,7 @@ def _vision_ocr(
         raise RuntimeError("Vision OCR 执行失败")
 
     observations = req.results() or []
-    # boundingBox is normalized, origin at lower-left
+    # boundingBox 是归一化坐标，原点在左下角
     for obs in observations:
         candidates = obs.topCandidates_(1)
         if not candidates:
@@ -266,14 +266,14 @@ def _vision_ocr(
         conf = float(best.confidence())
         bb = obs.boundingBox()
 
-        # We cannot reliably get width/height from CGImage without additional calls.
-        # For evaluation, we keep bbox normalized and also store approximate pixel box
-        # if the caller provides image size. We attach normalized in x/y/width/height.
+        # 无法可靠地从 CGImage 获取宽高，不做额外调用。
+        # 评测时保留归一化 bbox；如果调用方提供图像尺寸，也保存近似像素框。
+        # x/y/width/height 存的是归一化坐标。
         x = float(bb.origin.x)
         y = float(bb.origin.y)
         ww = float(bb.size.width)
         hh = float(bb.size.height)
-        # Convert to top-left normalized
+        # 转换为左上角原点的归一化坐标
         y_tl = 1.0 - y - hh
 
         results.append(OcrBox(text=text, confidence=conf, x=x, y=y_tl, width=ww, height=hh))
@@ -335,7 +335,7 @@ def _match_anchor(box: OcrBox, *, anchor: str, match_mode: str, min_confidence: 
 
 
 def _auto_roi_for_anchor(anchor: str) -> str:
-    """Heuristic ROI selection for KuGou UI anchors."""
+    """根据锚点文本启发式选择酷狗 UI 的 ROI。"""
 
     a = str(anchor or "")
     if a in {"音乐", "我的", "我喜欢", "创建歌单"}:
@@ -373,9 +373,9 @@ def _box_norm_to_pixel_rect(box: OcrBox, *, image_w: float, image_h: float) -> d
 
 
 def _png_type_identifier() -> str:
-    """Return a PNG type identifier for `CGImageDestinationCreateWithURL`.
+    """返回 `CGImageDestinationCreateWithURL` 所需的 PNG 类型标识。
 
-    Some macOS/PyObjC environments don't have `UniformTypeIdentifiers`.
+    有些 macOS/PyObjC 环境没有 `UniformTypeIdentifiers`。
     """
 
     try:
@@ -395,11 +395,11 @@ def _save_annotated_anchor_image(
     rects: list[dict[str, float]],
     points: list[dict[str, float]],
 ) -> None:
-    """Annotate base image with rectangles and points.
+    """在原图上标注矩形框和点。
 
-    Notes:
-    - This is a debug tool; we intentionally avoid external deps like Pillow.
-    - Coordinates are in image space with origin at top-left.
+    说明：
+    - 这是调试工具；故意不依赖外部库如 Pillow。
+    - 坐标是图像空间，原点在左上角。
     """
 
     from Foundation import NSURL
@@ -439,13 +439,13 @@ def _save_annotated_anchor_image(
     if ctx is None:
         raise RuntimeError("无法创建绘制上下文")
 
-    # Keep bitmap context in the default CoreGraphics coordinate system (origin bottom-left).
-    # Our OCR boxes are in image coordinates with origin top-left, so we convert Y when drawing annotations.
+    # bitmap context 保持 CoreGraphics 默认坐标系（原点左下角）。
+    # OCR 框是图像坐标（原点左上角），画标注时要转 Y 坐标。
 
     CGContextDrawImage(ctx, CGRectMake(0, 0, float(image_w), float(image_h)), base_cgimage)
 
     CGContextSetLineWidth(ctx, 2.0)
-    # red rectangles
+    # 红色矩形框
     CGContextSetRGBStrokeColor(ctx, 1.0, 0.1, 0.1, 0.95)
     for r in rects:
         x = float(r["x"])
@@ -455,7 +455,7 @@ def _save_annotated_anchor_image(
         y_bl = float(image_h) - y_tl - h
         CGContextStrokeRect(ctx, CGRectMake(x, y_bl, w, h))
 
-    # green points (crosshair)
+    # 绿色点标记（十字）
     CGContextSetRGBStrokeColor(ctx, 0.1, 0.9, 0.2, 0.95)
     for p in points:
         x = float(p["x"])
@@ -470,7 +470,7 @@ def _save_annotated_anchor_image(
 
     cg_out = None
     try:
-        # Prefer C API to avoid PyObjC differences.
+        # 优先用 C API，避免 PyObjC 差异。
         cg_out = CGBitmapContextCreateImage(ctx)
     except Exception:
         cg_out = None
@@ -790,18 +790,18 @@ async def main() -> int:
 
     debug_dir = _debug_dir()
 
-    # Copy a stable reference for offline comparisons.
+    # 复制一份用于离线比对。
     ref_name = f"ocr_eval_ref_{_now_ms()}.png"
     ref_path = debug_dir / ref_name
     try:
-        # best-effort copy
+        # 尽量复制
         ref_path.write_bytes(Path(image_path).read_bytes())
     except Exception:
         ref_path = Path(image_path)
 
     cg, w, h = _load_cgimage(str(ref_path))
 
-    # ROIs (normalized, origin top-left)
+    # ROIs（归一化坐标，原点左上角）
     rois = {
         "full": (0.0, 0.0, 1.0, 1.0),
         "sidebar": (0.0, 0.18, 0.22, 0.72),
@@ -837,7 +837,7 @@ async def main() -> int:
         )
         return 0
 
-    # Keywords we care about for UI automation.
+    # 我们关心的 UI 自动化关键词。
     keywords = [
         "音乐",
         "我的",
@@ -885,7 +885,7 @@ async def main() -> int:
     for roi_name, roi in rois.items():
         crop = _crop_cgimage(cg, w=w, h=h, roi=roi)
 
-        # save ROI snapshot for manual inspection
+        # 保存 ROI 快照供人工检查
         try:
             from Foundation import NSURL
             from Quartz import (
@@ -904,7 +904,7 @@ async def main() -> int:
             pass
 
         for cfg in configs:
-            # Preprocess (Quartz/CoreGraphics only)
+            # 预处理（仅用 Quartz/CoreGraphics）
             cg2 = _preprocess_cg(
                 crop,
                 scale=float(cfg["scale"]),
@@ -946,7 +946,7 @@ async def main() -> int:
     out_report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(str(out_report))
-    # Quick summary: best case by total keyword hits and confidence.
+    # 快速汇总：按关键词命中数和置信度选最佳配置。
     best = None
     for c in report["cases"]:
         hits = c["score"]["hits"]

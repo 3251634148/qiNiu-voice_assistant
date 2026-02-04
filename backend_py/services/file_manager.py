@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 
 class FileManager:
-    """Basic file operations used by the `file_control` tool."""
+    """基础文件操作封装（供 `file_control` 工具使用）。"""
 
     @staticmethod
     def _resolve(path: str) -> Path:

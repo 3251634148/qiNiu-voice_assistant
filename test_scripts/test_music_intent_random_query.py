@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Ensure project root is importable when running as a script.
+# 确保以脚本方式运行时能导入项目根目录。
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

@@ -6,15 +6,15 @@ from typing import Any, Dict, Optional
 
 
 class MacOSMediaControl:
-    """System media fallback control on macOS.
+    """macOS 系统媒体控制兜底。
 
-    Goals:
-    - Provide a "good enough" fallback using media keys / system volume.
-    - Prefer system-wide controls; for "now playing" we do best-effort per-player.
+    目标：
+    - 使用媒体键/系统音量提供“够用”的兜底能力。
+    - 优先走系统级控制；“当前曲目”按不同播放器做尽力而为的获取。
 
-    Notes:
-    - Media key injection uses `NSEventTypeSystemDefined` events (requires Accessibility permission).
-    - "当前曲目信息" is best-effort and depends on the active player integration.
+    注意：
+    - 媒体键注入使用 `NSEventTypeSystemDefined` 事件（需要辅助功能 Accessibility 权限）。
+    - “当前曲目信息”为尽力而为，取决于当前可用的播放器集成。
     """
 
     KEY_MAP = {
@@ -55,7 +55,7 @@ class MacOSMediaControl:
             )
 
         def _event(down: bool) -> Any:
-            # Based on common recipes for media key events.
+            # 参考常见的媒体键事件构造方式。
             flags = 0xA00 if down else 0xB00
             data1 = (int(key_code) << 16) | ((0xA if down else 0xB) << 8)
             return NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
@@ -85,7 +85,7 @@ class MacOSMediaControl:
         return {"message": f"已执行媒体键操作：{k}"}
 
     async def set_volume_delta(self, delta: int) -> Dict[str, Any]:
-        # Best-effort: change system output volume.
+        # 尽力而为：修改系统输出音量。
         d = int(delta)
         if d == 0:
             return {"message": "音量未变化"}
@@ -102,9 +102,9 @@ class MacOSMediaControl:
         return {"message": f"已设置系统音量：{nv}"}
 
     async def get_now_playing(self) -> Dict[str, Any]:
-        """Best-effort now playing.
+        """尽力而为地获取“当前正在播放”。
 
-        We try Apple Music then Spotify. System-wide session is not reliably accessible.
+        目前先尝试 Apple Music，再尝试 Spotify；系统级会话在 macOS 上并不总是可靠可取。
         """
 
         # Apple Music

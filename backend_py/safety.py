@@ -16,7 +16,7 @@ class RiskAssessment:
 
 
 class SafetyService:
-    """Safety validation aligned with backend/utils/safety.js (minimal port)."""
+    """安全校验（与 `backend/utils/safety.js` 行为对齐的最小移植版）。"""
 
     def __init__(self) -> None:
         home = str(Path.home())
@@ -123,7 +123,7 @@ class SafetyService:
         if allow_local_control is False and name in local_control_tools:
             return RiskAssessment(False, "high", "本地应用操控已被关闭", False)
 
-        # Tool-specific validation
+        # 按工具类型做参数与风险校验
         if name == "open_app":
             app_name = args.get("name")
             if not app_name or not isinstance(app_name, str) or not app_name.strip():
@@ -188,15 +188,15 @@ class SafetyService:
             action = args.get("action")
             if player not in {"kugou", "apple_music"}:
                 return RiskAssessment(False, "high", "player 仅支持 kugou / apple_music", True)
-            if action not in {"random_favorites", "favorites_first", "playlist", "search"}:
-                return RiskAssessment(False, "high", "action 仅支持 random_favorites / favorites_first / playlist / search", True)
+            if action not in {"favorites_first", "playlist", "search"}:
+                return RiskAssessment(False, "high", "action 仅支持 favorites_first / playlist / search", True)
 
-            # playlist/search needs query
+            # playlist/search 需要 query
             query = args.get("query")
             if action in {"playlist", "search"} and (not isinstance(query, str) or not query.strip()):
                 return RiskAssessment(False, "high", "playlist/search 需要提供 query", True)
 
-            # UI automation is high risk (clicking on screen)
+            # UI 自动化属于高风险（会真实点击屏幕）
             return RiskAssessment(True, "high", "ok", True)
 
         if name == "media_control":
@@ -266,7 +266,7 @@ class SafetyService:
 
             return RiskAssessment(True, max_level, "ok", need_confirm)
 
-        # Default risk table
+        # 默认风险表
         risk_table = {
             "play_music": ("low", False),
             "stop_music": ("low", False),
@@ -280,7 +280,7 @@ class SafetyService:
         return RiskAssessment(False, "high", f"未知的工具类型: {name}", False)
 
     def generate_confirmation_request(self, tool_call: Dict[str, Any], risk: RiskAssessment) -> Dict[str, Any]:
-        # Keep schema compatible with Node's SafetyService.generateConfirmationRequest output.
+        # 保持与 Node 侧 SafetyService.generateConfirmationRequest 的 schema 兼容。
         import time
         import random
 

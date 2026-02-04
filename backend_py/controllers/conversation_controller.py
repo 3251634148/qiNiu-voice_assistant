@@ -22,34 +22,6 @@ from backend_py.session_store import SessionStore
 logger = logging.getLogger("backend_py.controller")
 
 
-RANDOM_SONG_QUERIES = [
-    "周杰伦 告白气球",
-    "陈奕迅 十年",
-    "林俊杰 修炼爱情",
-    "邓紫棋 光年之外",
-    "五月天 倔强",
-    "薛之谦 演员",
-    "王菲 红豆",
-    "孙燕姿 遇见",
-    "张学友 一千个伤心的理由",
-    "李荣浩 年少有为",
-    "周深 大鱼",
-    "朴树 平凡之路",
-]
-
-
-RANDOM_MUSIC_KEYWORDS = [
-    "随便",
-    "随机",
-    "任意",
-    "都行",
-    "听点什么",
-    "听点歌",
-    "来点歌",
-    "来点音乐",
-]
-
-
 class ConversationController:
     def __init__(self, *, sio: socketio.AsyncServer) -> None:
         self.sio = sio
@@ -85,7 +57,7 @@ class ConversationController:
         if isinstance(audio_data, list) and all(isinstance(x, int) for x in audio_data):
             return bytes(audio_data)
         if isinstance(audio_data, str):
-            # Some clients may send base64 string
+            # 部分客户端可能会发送 base64 字符串
             try:
                 import base64
 
@@ -366,32 +338,16 @@ class ConversationController:
         return any(c in t for c in claims)
 
     @staticmethod
-    def _is_random_music_request(user_text: str) -> bool:
-        t = str(user_text or "").strip()
-        if not t:
-            return False
-
-        return any(k in t for k in RANDOM_MUSIC_KEYWORDS)
-
-    @staticmethod
-    def _pick_random_song_query() -> str:
-        return random.choice(RANDOM_SONG_QUERIES)
-
-    @staticmethod
     def _extract_music_search_query(user_text: str) -> Optional[str]:
         t = str(user_text or "").strip()
         if not t:
             return None
 
-        # Guard: stories/jokes/reading are not music playback.
+        # 防误判：讲故事/讲笑话/念诗/读文章/解释内容不属于播放音乐。
         if any(x in t for x in ["讲故事", "讲笑话", "念诗", "读文章", "解释"]):
             return None
 
-        # Guard: random/generic music requests should NOT be treated as a song title query.
-        if ConversationController._is_random_music_request(t):
-            return None
-
-        # Extract quoted titles.
+        # 提取书名号/引号中的歌名。
         if "《" in t and "》" in t:
             start = t.find("《")
             end = t.find("》", start + 1)
@@ -410,7 +366,7 @@ class ConversationController:
             if inner and inner not in {"音乐", "歌曲", "歌"}:
                 return inner
 
-        # Remove common leading phrases.
+        # 去掉常见的口头前缀。
         for prefix in [
             "我想听",
             "我要听",
@@ -430,7 +386,7 @@ class ConversationController:
         if not t or t in {"音乐", "歌曲", "歌"}:
             return None
 
-        # Pattern: "歌手的歌名"
+        # 识别模式：“歌手的歌名”
         m = re.match(r"^(.{1,10})的(.{1,25})$", t)
         if m:
             artist = m.group(1).strip()
@@ -438,7 +394,7 @@ class ConversationController:
             if song and song not in {"音乐", "歌曲", "歌"}:
                 return f"{artist} {song}".strip()
 
-        # Filter out known generic phrases (additional safety).
+        # 过滤已知的泛化短语（额外安全护栏）。
         generic_phrases = {
             "来点音乐",
             "来点歌",
@@ -449,7 +405,7 @@ class ConversationController:
         if t in generic_phrases:
             return None
 
-        # If it still looks like a meaningful query.
+        # 若仍像一个有效的搜索词，则直接返回。
         if 2 <= len(t) <= 30:
             return t
 
@@ -530,46 +486,35 @@ class ConversationController:
         fallback_applied = False
         fallback_reason = None
 
-        # Fallback: avoid "假播放" when the model didn't emit actions.
+        # 兜底：当模型未输出动作时，避免出现“口头说在播放但其实没执行”的假播放。
+        # 注意：后端不实现“随机选歌库”；随机化应由 LLM 生成真实的 query。
         if not selected_tool_calls and self._is_music_request(user_text):
-            if self._is_random_music_request(user_text):
-                q_random = self._pick_random_song_query()
-                response_text = f"我给你随机挑一首歌，用酷狗搜索并播放“{q_random}”。这需要你确认一下。"
+            q = self._extract_music_search_query(user_text)
+            if q:
+                response_text = f"我可以用酷狗搜索并播放“{q}”。这需要你确认一下。"
                 selected_tool_calls = [
                     self._make_tool_call(
                         "music_ui",
-                        {"player": "kugou", "action": "search", "query": q_random},
-                        prefix="fallback_music_ui_random",
+                        {"player": "kugou", "action": "search", "query": q},
+                        prefix="fallback_music_ui",
                     )
                 ]
-                fallback_reason = "random_song_search_requires_confirmation"
+                fallback_reason = "song_search_requires_confirmation"
             else:
-                q = self._extract_music_search_query(user_text)
-                if q:
-                    response_text = f"我可以用酷狗搜索并播放“{q}”。这需要你确认一下。"
-                    selected_tool_calls = [
-                        self._make_tool_call(
-                            "music_ui",
-                            {"player": "kugou", "action": "search", "query": q},
-                            prefix="fallback_music_ui",
-                        )
-                    ]
-                    fallback_reason = "song_search_requires_confirmation"
-                else:
-                    response_text = "好，我先打开酷狗开始播放。"
-                    selected_tool_calls = [
-                        self._make_tool_call(
-                            "play_music",
-                            {"source": "kugou"},
-                            prefix="fallback_play_music",
-                        )
-                    ]
-                    fallback_reason = "generic_music_default_kugou"
+                response_text = "好，我先打开酷狗开始播放。"
+                selected_tool_calls = [
+                    self._make_tool_call(
+                        "play_music",
+                        {"source": "kugou"},
+                        prefix="fallback_play_music",
+                    )
+                ]
+                fallback_reason = "generic_music_default_kugou"
 
             intent = self.merge_intent_with_tool_calls(intent, selected_tool_calls)
             fallback_applied = True
 
-        # Force UI automation for specific song queries even if the model picked low-risk play_music.
+        # 强制升级：即便模型选了低风险 play_music，只要带明确曲目 query，也升级为 UI 搜索播放。
         forced_reason = None
         if selected_tool_calls:
             first = selected_tool_calls[0] if isinstance(selected_tool_calls, list) else None
@@ -586,24 +531,8 @@ class ConversationController:
             elif isinstance(args_raw, dict):
                 args_obj = args_raw
 
-            # 1) If user asks for random music but model only opened KuGou, upgrade to UI search with a real song.
-            if forced_reason is None and first_name == "play_music" and self._is_music_request(user_text):
-                src = str(args_obj.get("source") or "").strip().lower()
-                if src in {"", "kugou"} and self._is_random_music_request(user_text):
-                    q_random = self._pick_random_song_query()
-                    response_text = f"我给你随机挑一首歌，用酷狗搜索并播放“{q_random}”。这需要你确认一下。"
-                    selected_tool_calls = [
-                        self._make_tool_call(
-                            "music_ui",
-                            {"player": "kugou", "action": "search", "query": q_random},
-                            prefix="force_music_ui_random",
-                        )
-                    ]
-                    intent = self.merge_intent_with_tool_calls(intent, selected_tool_calls)
-                    forced_reason = "force_music_ui_for_random_request"
-
-            # 2) If model chose low-risk play_music but also provided a search query, upgrade to UI search.
-            # NOTE: We do NOT attempt to hardcode-parse user text here; query normalization should be done by LLM.
+            # 1) 若模型选择了低风险 play_music 但同时给出了 query，则升级为 UI 搜索播放。
+            # 注意：这里不再硬编码解析用户原话，query 的归一化应由 LLM 完成。
             if forced_reason is None and first_name == "play_music" and self._is_music_request(user_text):
                 src = str(args_obj.get("source") or "").strip().lower()
                 q_from_model = str(args_obj.get("query") or "").strip()
@@ -619,7 +548,7 @@ class ConversationController:
                     intent = self.merge_intent_with_tool_calls(intent, selected_tool_calls)
                     forced_reason = "force_music_ui_for_song_query_from_model"
 
-            # Favorites first: user explicitly asks "我喜欢 ... 第一首"
+            # “我喜欢第一首”：用户明确要求播放我喜欢里的第一首
             if forced_reason is None:
                 t = str(user_text or "")
                 if ("我喜欢" in t or "喜欢的歌" in t or "我喜爱" in t) and ("第一首" in t or "第一首歌" in t):
@@ -644,7 +573,7 @@ class ConversationController:
             fallback_applied = True
             fallback_reason = forced_reason
 
-        # If we still have no actions, ensure we don't claim playback.
+        # 若仍无动作，确保不会声称“正在播放/已开始播放”。
         if not selected_tool_calls and self._looks_like_playback_claim(response_text):
             response_text = "我还没开始播放。你想听什么歌？或者直接说“播放音乐”。"
 
@@ -681,7 +610,7 @@ class ConversationController:
             await self.handle_tool_calls(sid=sid, tool_calls=selected_tool_calls)
             return
 
-        # TTS streaming
+        # TTS 流式输出
         voice_settings = session.tts_settings or {"gender": "female", "rate": 1.0, "pitch": 1.0}
 
         cancel_event = asyncio.Event()
@@ -711,7 +640,7 @@ class ConversationController:
                     cancel_event=cancel_event,
                 )
 
-                # Always send completion so the frontend can stop waiting.
+                # 无论是否有完整音频，都发送 completion，避免前端一直等待。
                 await self.sio.emit(
                     "audio-chunk",
                     {
@@ -736,7 +665,7 @@ class ConversationController:
                     )
 
             except asyncio.CancelledError:
-                # best-effort completion
+                # 尽力而为：仍发送 completion，保证前端状态可收敛。
                 await self.sio.emit(
                     "audio-chunk",
                     {
@@ -763,7 +692,7 @@ class ConversationController:
         self._tts_tasks[sid] = task
 
     async def handle_tool_calls(self, *, sid: str, tool_calls: List[Dict[str, Any]]) -> None:
-        # Align behavior: only handle first few calls.
+        # 与 Node 侧对齐：只处理前几条 tool call。
         for tc in tool_calls[:3]:
             fn = tc.get("function") or {}
             name = fn.get("name") or tc.get("name")
@@ -794,7 +723,7 @@ class ConversationController:
                 )
                 continue
 
-            # confirmation
+            # 需要确认
             if risk.requires_confirmation:
                 confirmation = self.safety_service.generate_confirmation_request(parsed_tool_call, risk)
                 self.session_store.set_pending_confirmation(sid, confirmation)
@@ -843,7 +772,7 @@ class ConversationController:
             to=sid,
         )
 
-        # voice feedback for tool result
+        # 工具执行结果的语音反馈
         if result.get("success") and (result.get("result") or {}).get("message"):
             msg = (result.get("result") or {}).get("message")
             voice_settings = session.tts_settings or {"gender": "female", "rate": 1.0, "pitch": 1.0}
@@ -881,7 +810,7 @@ class ConversationController:
             await self.execute_tool_call(sid=sid, tool_call=pending_tool_call)
             return
 
-        # rejected
+        # 用户拒绝
         self.session_store.clear_pending_tool_call(sid)
         await self.sio.emit(
             "assistant-message",
@@ -894,7 +823,7 @@ class ConversationController:
         )
 
     async def handle_cancel(self, *, sid: str, silent: bool) -> None:
-        # cancel pending tool/confirmation + stop tts
+        # 取消待确认/待执行工具，并停止 TTS
         self.stop_tts(sid)
         self.session_store.clear_pending_confirmation(sid)
         self.session_store.clear_pending_tool_call(sid)

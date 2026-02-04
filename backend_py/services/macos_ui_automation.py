@@ -32,7 +32,7 @@ class WindowBounds:
 
 @dataclass(frozen=True)
 class OcrBox:
-    """OCR result box in screenshot (image) coordinates with origin at top-left."""
+    """OCR 结果框（截图图像坐标系，左上角为原点）。"""
 
     text: str
     confidence: float
@@ -133,7 +133,7 @@ class MacOSUIAutomation:
         if not raw.startswith(sig):
             return {"ok": False, "skipped": True, "reason": "not_png", "path": str(path)}
 
-        # Parse chunks.
+        # 解析 PNG chunk。
         offset = len(sig)
         idat_parts: list[bytes] = []
         chunks: list[tuple[bytes, bytes, bool]] = []  # (type, raw_chunk_bytes, is_idat)
@@ -157,14 +157,14 @@ class MacOSUIAutomation:
             chunk_bytes = raw[chunk_start:crc_end]
             data = raw[data_start:data_end]
 
-            # Avoid touching APNG.
+            # 避免处理 APNG（动图 PNG），这里仅处理静态 PNG。
             if ctype in {b"acTL", b"fcTL", b"fdAT"}:
                 is_apng = True
 
             if ctype == b"IDAT":
                 saw_idat = True
                 idat_parts.append(data)
-                # Keep a placeholder so we can preserve chunk order.
+                # 保留占位符以便后续重建文件时保持原始 chunk 顺序。
                 chunks.append((ctype, b"", True))
             else:
                 chunks.append((ctype, chunk_bytes, False))
@@ -224,8 +224,7 @@ class MacOSUIAutomation:
             crc_bytes = struct.pack(">I", crc & 0xFFFFFFFF)
             return length_bytes + chunk_type + payload + crc_bytes
 
-        # Rebuild file: preserve original chunk order, but replace all IDAT chunks with
-        # a single recompressed IDAT at the first IDAT position.
+        # 重建 PNG：保持原始 chunk 顺序，但把所有 IDAT 合并为“首个 IDAT 位置的一段重压缩 IDAT”。
         out_parts: list[bytes] = [sig]
         inserted = False
         for ctype, chunk_bytes, is_idat_chunk in chunks:
@@ -238,7 +237,7 @@ class MacOSUIAutomation:
             out_parts.append(chunk_bytes)
 
         if not inserted:
-            # Extremely defensive: if we somehow didn't see an IDAT placeholder, append before the end.
+            # 极端兜底：如果意外没看到 IDAT 占位符，就在结尾前补一个 IDAT。
             out_parts.append(_pack_chunk(b"IDAT", recompressed))
 
         new_raw = b"".join(out_parts)
@@ -258,7 +257,7 @@ class MacOSUIAutomation:
 
         after_bytes = tmp_path.stat().st_size
 
-        # Only replace if smaller.
+        # 仅当新文件更小才替换（保持像素不变，避免无意义改写）。
         replaced = False
         if after_bytes < before_bytes:
             try:
@@ -296,7 +295,7 @@ class MacOSUIAutomation:
         }
 
     async def lossless_compress_png(self, png_path: str) -> dict[str, Any]:
-        """Losslessly recompress a PNG in a background thread (best-effort)."""
+        """在后台线程对 PNG 做无损重压缩（尽力而为）。"""
 
         if not self._is_png_lossless_compress_enabled():
             return {"ok": True, "enabled": False, "skipped": True, "reason": "disabled", "path": str(png_path)}
@@ -337,7 +336,7 @@ class MacOSUIAutomation:
 
     @staticmethod
     def _get_screens_snapshot_sync() -> dict[str, Any]:
-        """Return a snapshot of current display frames in AppKit coords (origin bottom-left)."""
+        """返回当前显示器 frame 快照（AppKit 坐标系，左下角为原点）。"""
 
         def _infer_global_max_y() -> Optional[dict[str, Any]]:
             """Infer the Y-bridge between Quartz event-space and AppKit global coords.
@@ -443,7 +442,7 @@ class MacOSUIAutomation:
         return None
 
     async def screenshot(self, *, tag: str = "screen") -> str:
-        """Capture current screen to a PNG and return file path."""
+        """截取当前屏幕并保存为 PNG，返回文件路径。"""
 
         out_path = self._debug_dir() / f"{tag}_{int(time.time() * 1000)}.png"
 
@@ -453,7 +452,7 @@ class MacOSUIAutomation:
                 raise RuntimeError(proc.stderr.strip() or "screencapture 执行失败")
 
             if self._is_png_lossless_compress_enabled():
-                # Best-effort: keep pixels identical, but may reduce file size.
+                # 尽力而为：保持像素完全一致，但可能降低文件体积。
                 self._lossless_recompress_png_zlib_sync(str(out_path))
 
         await asyncio.to_thread(_run)
@@ -468,7 +467,7 @@ class MacOSUIAutomation:
             except Exception:
                 return 0.0
 
-        # Quartz kCGWindowBounds keys are typically: X/Y/Width/Height.
+        # Quartz 的 kCGWindowBounds 通常包含键：X/Y/Width/Height。
         x = _get("X")
         y = _get("Y")
         w = _get("Width")
@@ -496,7 +495,7 @@ class MacOSUIAutomation:
     @staticmethod
     def _normalize_owner_name(value: str) -> str:
         v = str(value or "").strip().lower()
-        # Normalize by removing spaces/punctuations, keep alnum and CJK.
+        # 归一化：去掉空白与标点，仅保留字母数字与中日韩字符。
         return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", v)
 
     @staticmethod
@@ -658,7 +657,7 @@ class MacOSUIAutomation:
             o = cls._normalize_owner_name(owner_name)
             if not o:
                 return False
-            # Prefer containment match so that e.g. "Kugou Music" matches "KugouMusic".
+            # 优先用“包含”匹配，例如让 “Kugou Music” 能匹配到 “KugouMusic”。
             for t in tokens:
                 if not t:
                     continue
@@ -687,7 +686,7 @@ class MacOSUIAutomation:
                     layer = int(info.get("kCGWindowLayer") or 0)
                 except Exception:
                     layer = 0
-                # Some apps may not be in layer 0; keep it conservative but not too strict.
+                # 部分应用窗口不一定在 layer=0；这里保持保守但不过度严格。
                 if layer < 0 or layer > 2:
                     continue
 
@@ -723,7 +722,7 @@ class MacOSUIAutomation:
 
         candidates = _pick_candidates(windows)
         if not candidates:
-            # Fallback: broader enumeration; still exclude desktop elements.
+            # 兜底：扩大枚举范围，但仍排除桌面元素。
             all_windows = CGWindowListCopyWindowInfo(
                 int(kCGWindowListOptionAll) | int(kCGWindowListExcludeDesktopElements),
                 kCGNullWindowID,
@@ -772,8 +771,7 @@ class MacOSUIAutomation:
 
         def _run() -> Dict[str, Any]:
             wid, bounds, owner = self._find_best_window_sync(owner_names)
-            # NOTE: must disable window shadow (-o), otherwise the PNG includes extra pixels and breaks
-            # the linear mapping between `windowBounds` and `imageSize`.
+            # 注意：必须禁用窗口阴影（-o），否则 PNG 会多出阴影像素，破坏 `windowBounds` 与 `imageSize` 的线性映射。
             proc = subprocess.run(
                 ["screencapture", "-l", str(wid), "-x", "-o", str(out_path)],
                 capture_output=True,
@@ -835,7 +833,7 @@ class MacOSUIAutomation:
         ih = float(image_size.get("height") or 0.0)
 
         if iw <= 1 or ih <= 1 or wb.width <= 1 or wb.height <= 1:
-            # Fallback: assume 1:1 and treat window_bounds.y as already in event-space.
+            # 兜底：假设 1:1，并把 window_bounds.y 当作已处于事件坐标系。
             return (wb.x + float(x), wb.y + float(y))
 
         scale_x = wb.width / iw
@@ -879,7 +877,7 @@ class MacOSUIAutomation:
         ih = float(image_size.get("height") or 0.0)
 
         if iw <= 1 or ih <= 1 or wb.width <= 1 or wb.height <= 1:
-            # Best-effort fallback.
+            # 尽力而为的兜底。
             return (float(sx) - float(wb.x), float(sy) - float(wb.y))
 
         scale_x = wb.width / iw
@@ -942,14 +940,14 @@ class MacOSUIAutomation:
         req.setRecognitionLevel_(1)  # accurate
         req.setUsesLanguageCorrection_(True)
 
-        # Improve Chinese UI OCR quality.
+        # 提升中文 UI 的 OCR 识别质量。
         try:
             req.setRecognitionLanguages_(["zh-Hans", "zh-Hant", "en-US"])
         except Exception:
-            # Some macOS/PyObjC versions may not expose this setter.
+            # 某些 macOS/PyObjC 版本可能不暴露该 setter。
             pass
 
-        # Bias OCR towards common UI words.
+        # 通过常见 UI 词表对 OCR 做偏置，提升命中率。
         try:
             req.setCustomWords_(["搜索", "我的", "收藏", "我喜欢", "喜欢", "歌单", "单曲", "歌曲", "播放", "暂停"])
         except Exception:
@@ -977,7 +975,7 @@ class MacOSUIAutomation:
             bw = float(bb.size.width) * w
             bh = float(bb.size.height) * h
 
-            # Convert to top-left origin
+            # 转换为左上角原点坐标
             x = x_ll
             y = h - y_ll - bh
             results.append(OcrBox(text=text, confidence=confidence, x=x, y=y, width=bw, height=bh))
@@ -989,7 +987,7 @@ class MacOSUIAutomation:
 
     @staticmethod
     def _load_cgimage_sync(image_path: str) -> tuple[Any, int, int]:
-        """Load image into a CGImage and return (cgimage, width, height)."""
+        """加载图片为 CGImage，并返回 (cgimage, width, height)。"""
 
         MacOSUIAutomation._import_vision()
 
@@ -1128,7 +1126,7 @@ class MacOSUIAutomation:
         min_text_height: Optional[float] = None,
         custom_words: Optional[Sequence[str]] = None,
     ) -> List[OcrBox]:
-        """Run Vision OCR on a CGImage and return boxes in image pixel coords (origin top-left)."""
+        """对 CGImage 执行 Vision OCR，并返回图像像素坐标系（左上角原点）的文本框列表。"""
 
         MacOSUIAutomation._import_vision()
 
@@ -1289,12 +1287,12 @@ class MacOSUIAutomation:
         - It does not account for Retina scaling; prefer window-targeted flow when possible.
         """
 
-        # Quartz event coordinate space uses top-left origin.
+        # Quartz 事件坐标系使用左上角原点。
         return (float(x), float(y))
 
     @staticmethod
     def _click_at_sync(x: float, y: float, *, clicks: int = 1, interval_sec: float = 0.12) -> None:
-        """Click at a point in Quartz event coordinate space (origin top-left)."""
+        """在 Quartz 事件坐标系指定点点击（左上角原点）。"""
         try:
             from Quartz import (
                 CGEventCreateMouseEvent,
@@ -1323,6 +1321,59 @@ class MacOSUIAutomation:
         await asyncio.to_thread(self._click_at_sync, x, y, clicks=clicks)
 
     @staticmethod
+    def _scroll_wheel_sync(
+        *,
+        delta_y: int,
+        unit: str = "line",
+    ) -> None:
+        """Post a vertical scroll wheel event.
+
+        Args:
+            delta_y: Positive/negative scroll amount. The direction can vary by app and system settings,
+                so callers should use OCR/state detection to validate.
+            unit: "line" (default) or "pixel".
+        """
+
+        try:
+            from Quartz import (
+                CGEventCreateScrollWheelEvent,
+                CGEventPost,
+                kCGHIDEventTap,
+                kCGScrollEventUnitLine,
+                kCGScrollEventUnitPixel,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "滚动事件依赖未安装或不可用：请安装 pyobjc-framework-Quartz。\n"
+                f"原始错误：{e}"
+            )
+
+        u = kCGScrollEventUnitLine if str(unit or "line").lower() == "line" else kCGScrollEventUnitPixel
+        ev = CGEventCreateScrollWheelEvent(None, u, 1, int(delta_y))
+        if ev is None:
+            raise RuntimeError("无法创建滚动事件")
+        CGEventPost(kCGHIDEventTap, ev)
+
+    async def scroll_wheel(
+        self,
+        *,
+        delta_y: int,
+        steps: int = 1,
+        unit: str = "line",
+        interval_sec: float = 0.05,
+    ) -> None:
+        """Scroll vertically by posting wheel events (best-effort).
+
+        This is primarily used for UI automation flows where the app does not expose a stable API.
+        """
+
+        n = max(1, int(steps))
+        for idx in range(n):
+            await asyncio.to_thread(self._scroll_wheel_sync, delta_y=int(delta_y), unit=str(unit))
+            if idx < n - 1:
+                await asyncio.sleep(float(interval_sec))
+
+    @staticmethod
     def _get_mouse_position_sync() -> dict[str, float]:
         """Read current mouse cursor position.
 
@@ -1347,7 +1398,7 @@ class MacOSUIAutomation:
         return {"x": float(pt.x), "y": float(pt.y)}
 
     async def get_mouse_position(self) -> dict[str, float]:
-        """Async wrapper for reading the current mouse cursor position."""
+        """异步读取当前鼠标光标位置。"""
 
         return await asyncio.to_thread(self._get_mouse_position_sync)
 
@@ -1368,7 +1419,7 @@ class MacOSUIAutomation:
 
     @staticmethod
     def _warp_mouse_sync(x: float, y: float) -> None:
-        """Move the real mouse cursor to the given event-space point (best-effort)."""
+        """将真实鼠标光标移动到事件坐标系的指定点（尽力而为）。"""
 
         try:
             from Quartz import CGAssociateMouseAndMouseCursorPosition, CGWarpMouseCursorPosition, CGPoint
@@ -1378,7 +1429,7 @@ class MacOSUIAutomation:
                 f"原始错误：{e}"
             )
 
-        # Ensure the mouse and cursor are associated (in case they were decoupled).
+        # 确保鼠标与光标处于关联状态（避免曾被系统/工具解耦）。
         try:
             CGAssociateMouseAndMouseCursorPosition(True)
         except Exception:
@@ -1388,7 +1439,7 @@ class MacOSUIAutomation:
         try:
             CGWarpMouseCursorPosition(pt)
         except Exception:
-            # Fallback: move cursor on main display.
+            # 兜底：尝试在主屏移动光标。
             try:
                 from Quartz import CGDisplayMoveCursorToPoint, CGMainDisplayID
 
@@ -1397,7 +1448,7 @@ class MacOSUIAutomation:
                 raise RuntimeError(f"无法移动鼠标光标：{e}")
 
     async def warp_mouse(self, x: float, y: float) -> None:
-        """Async wrapper for moving the real mouse cursor."""
+        """异步移动真实鼠标光标。"""
 
         await asyncio.to_thread(self._warp_mouse_sync, float(x), float(y))
 
@@ -1713,7 +1764,7 @@ class MacOSUIAutomation:
 
         def _norm(value: str) -> str:
             v = str(value or "")
-            # Remove all whitespace and common replacement chars.
+            # 去除全部空白与常见替换字符，便于匹配。
             v = re.sub(r"\s+", "", v)
             v = v.replace("\uffff", "").replace("\ufffd", "")
             return v.strip().lower()
@@ -1734,7 +1785,7 @@ class MacOSUIAutomation:
 
         candidates = [b for b in boxes if _match(b)]
         if not candidates:
-            # Dump OCR results for debugging.
+            # 落盘 OCR 结果用于排障。
             def _dump() -> str:
                 out_path = self._debug_dir() / f"ocr_dump_{tag}_{int(time.time() * 1000)}.json"
                 top = sorted(boxes, key=lambda x: x.confidence, reverse=True)[:60]
@@ -1819,7 +1870,7 @@ class MacOSUIAutomation:
         """
 
         value = str(text or "")
-        # Escape for AppleScript
+        # AppleScript 字符串转义
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         script = f'tell application "System Events" to keystroke "{escaped}"'
         self._osascript(script)
@@ -1827,7 +1878,7 @@ class MacOSUIAutomation:
             await asyncio.sleep(float(delay_sec))
 
     async def hotkey(self, key: str, *, modifiers: Optional[Iterable[str]] = None) -> None:
-        """Press a hotkey, e.g. key='f' modifiers=['command down']"""
+        """按下组合键（例如 key='f', modifiers=['command down']）。"""
 
         k = str(key or "").strip()
         if not k:
@@ -1839,7 +1890,7 @@ class MacOSUIAutomation:
         self._osascript(script)
 
     async def key_code(self, code: int) -> None:
-        """Press a keycode via AppleScript. Example: Return=36."""
+        """通过 AppleScript 按下指定 keycode（例如回车 Return=36）。"""
 
         script = f'tell application "System Events" to key code {int(code)}'
         self._osascript(script)
@@ -1851,7 +1902,7 @@ class MacOSUIAutomation:
         self._osascript(f'tell application "{name}" to activate')
 
     async def ensure_accessibility_ready(self) -> None:
-        """Best-effort check to surface missing Accessibility permission early."""
+        """尽力而为地提前检查辅助功能（Accessibility）权限是否缺失。"""
 
         try:
             self._osascript('tell application "System Events" to get name of processes')
@@ -1874,14 +1925,14 @@ class MacOSUIAutomation:
             return ""
 
     async def get_frontmost_process_name(self) -> str:
-        """Get the frontmost application process name via System Events."""
+        """通过 System Events 获取当前前台应用进程名。"""
 
         return self._osascript(
             'tell application "System Events" to get name of first application process whose frontmost is true'
         )
 
     async def set_process_frontmost(self, process_name: str) -> None:
-        """Force a process to be frontmost via System Events (best-effort)."""
+        """通过 System Events 强制置前某个进程（尽力而为）。"""
 
         name = str(process_name or "").strip()
         if not name:
@@ -1919,7 +1970,7 @@ class MacOSUIAutomation:
 
         screen = self._get_main_screen_size()
 
-        # AppleScript window position is typically in global screen coords; keep it conservative and clamp to >= 0.
+        # AppleScript 的窗口位置通常使用全局屏幕坐标；这里保持保守，并把位置钳制到 >= 0。
         x = int(max(0, round((float(screen.width) - float(w)) / 2.0)))
         y = int(max(0, round((float(screen.height) - float(h)) / 2.0)))
 
@@ -1957,7 +2008,7 @@ class MacOSUIAutomation:
         }
 
     async def get_focused_ui_element_info(self, process_name: str) -> Dict[str, Any]:
-        """Best-effort read focused UI element info for a given process."""
+        """尽力而为读取指定进程的当前焦点 UI 元素信息。"""
 
         name = str(process_name or "").strip()
         if not name:
@@ -2003,7 +2054,7 @@ class MacOSUIAutomation:
         return {"ok": True, "role": role, "description": desc, "value": value}
 
     async def dump_process_menu(self, *, process_name: str, tag: str = "menu_dump") -> str:
-        """Dump a specific process's menu structure to ui_debug for debugging."""
+        """导出指定进程的菜单结构到 ui_debug（用于排障）。"""
 
         name = str(process_name or "").strip()
         if not name:
@@ -2118,7 +2169,7 @@ class MacOSUIAutomation:
         tag: str = "menu_click",
         dry_run: bool = False,
     ) -> Dict[str, Any]:
-        """Find and click a menu item (or submenu item) for a specific process."""
+        """在指定进程菜单中查找并点击菜单项（或子菜单项）。"""
 
         name = str(process_name or "").strip()
         if not name:
@@ -2197,7 +2248,7 @@ class MacOSUIAutomation:
         return {"process": name, "keywords": kws, "matchedPath": str(path).strip(), "dryRun": dry_run}
 
     async def dump_frontmost_menu(self, *, tag: str = "menu_dump") -> str:
-        """Dump frontmost app's menu structure to ui_debug for debugging."""
+        """导出当前前台应用的菜单结构到 ui_debug（用于排障）。"""
 
         def _run() -> str:
             out_path = self._debug_dir() / f"{tag}_{int(time.time() * 1000)}.json"
@@ -2305,7 +2356,7 @@ class MacOSUIAutomation:
         tag: str = "menu_click",
         dry_run: bool = False,
     ) -> Dict[str, Any]:
-        """Find and click a menu item (or submenu item) whose name contains any keyword."""
+        """查找并点击名称包含任意关键词的菜单项（或子菜单项）。"""
 
         kws = [str(k).strip() for k in (keywords or []) if str(k).strip()]
         if not kws:

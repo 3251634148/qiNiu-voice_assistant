@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""End-to-end test: KuGou `music_ui(search)` with OCR-first + coordinate fallback.
+"""端到端测试：酷狗 `music_ui(search)`（OCR 优先 + 坐标兜底）。
 
 目标：
 - 从服务侧直接调用 `MusicController.music_ui(player="kugou", action="search")`
@@ -21,7 +21,7 @@ import os
 import time
 from pathlib import Path
 
-# Ensure project root is importable when running as a script.
+# 确保以脚本方式运行时能导入项目根目录。
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,11 +31,11 @@ from backend_py.services.music_controller import MusicController  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Debug service KuGou search: OCR-first + fallback")
-    parser.add_argument("--query", type=str, default="周杰伦 告白气球", help="Search query")
-    parser.add_argument("--runs", type=int, default=2, help="How many runs")
-    parser.add_argument("--sleep-sec", type=float, default=0.8, help="Sleep between runs")
-    parser.add_argument("--dry-run", action="store_true", help="Only simulate (no clicks)")
+    parser = argparse.ArgumentParser(description="调试酷狗服务搜索：OCR 优先 + 坐标兜底")
+    parser.add_argument("--query", type=str, default="周杰伦 告白气球", help="搜索关键词")
+    parser.add_argument("--runs", type=int, default=2, help="运行次数")
+    parser.add_argument("--sleep-sec", type=float, default=0.8, help="每轮之间的等待时间")
+    parser.add_argument("--dry-run", action="store_true", help="仅模拟（不真正点击）")
     return parser.parse_args()
 
 

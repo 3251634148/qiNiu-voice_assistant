@@ -15,10 +15,10 @@ class CommandResult:
 
 
 class DevRunner:
-    """Run local commands with basic safety/timeout.
+    """执行本地命令（带基础安全校验与超时控制）。
 
-    This is used for stable developer workflows such as running tests.
-    We intentionally avoid `shell=True` by default.
+    主要用于稳定的开发流程，例如运行测试。
+    为降低注入风险，这里默认不使用 `shell=True`。
     """
 
     def __init__(self) -> None:
@@ -43,7 +43,7 @@ class DevRunner:
         if not raw:
             raise RuntimeError("command 不能为空")
 
-        # Disallow shell chaining/injection style tokens for now.
+        # 暂时禁止使用 shell 链式/注入风格符号。
         if any(x in raw for x in ["&&", ";", "|", "`", "$("]):
             raise RuntimeError("命令包含不安全的连接符号（&&/;/|/`/$()），请使用单条命令")
 

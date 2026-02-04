@@ -197,7 +197,7 @@ async def main() -> int:
                 print("\n[server log tail]\n" + _tail_file(server_log_path, limit=160))
                 raise RuntimeError(f"工具执行失败：{tool_result}")
 
-            # Optional: summarize debug payload (kugou search/play verification).
+            # 可选：汇总 debug 信息（酷狗搜索/播放验证）。
             result_payload = tool_result.get("result") if isinstance(tool_result.get("result"), dict) else {}
             debug_payload = result_payload.get("debug") if isinstance(result_payload, dict) else None
             if isinstance(debug_payload, dict):
@@ -224,7 +224,7 @@ async def main() -> int:
                         "tabRatio": rp.get("tabRatio"),
                     })
 
-                # Gate (opt-in): ensure the song is actually playing.
+                # 门控（可选）：确认歌曲正在播放。
                 if os.getenv("E2E_ASSERT_PLAYING", "0") == "1" and "播放" in str(t):
                     confirmed = bool(pb_list and isinstance(pb_list[-1], dict) and pb_list[-1].get("confirmed") is True)
                     if not confirmed:

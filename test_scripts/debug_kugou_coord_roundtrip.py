@@ -186,14 +186,14 @@ def _save_annotated_png(
 
     CGContextDrawImage(ctx, CGRectMake(0, 0, float(w), float(h)), cg)
 
-    # red rectangles
+    # 红色矩形框
     CGContextSetLineWidth(ctx, 2.0)
     CGContextSetRGBStrokeColor(ctx, 1.0, 0.1, 0.1, 0.95)
     for r in rects:
         y_bl = float(h) - float(r.y) - float(r.height)
         CGContextStrokeRect(ctx, CGRectMake(float(r.x), y_bl, float(r.width), float(r.height)))
 
-    # green points
+    # 绿色点标记
     CGContextSetRGBStrokeColor(ctx, 0.1, 0.9, 0.2, 0.95)
     for p in points:
         x = float(p.x)
@@ -305,7 +305,7 @@ async def main() -> int:
     if not img_path:
         raise RuntimeError("missing screenshotPath")
 
-    # Basic scale sanity check (Retina points vs pixels)
+    # 基础缩放检查（Retina points vs 像素）
     wb = cap.get("windowBounds") or {}
     isz = cap.get("imageSize") or {}
     wb_w = float(wb.get("width") or 0.0)
@@ -329,7 +329,7 @@ async def main() -> int:
     if not scales:
         scales = [1.0, 2.4, 3.2]
 
-    # Prepare deterministic test points (image coords)
+    # 准备确定性测试点（截图像素坐标）
     img_w_i = float(img_w)
     img_h_i = float(img_h)
     det_points: List[Dict[str, Any]] = []
@@ -357,7 +357,7 @@ async def main() -> int:
                 img_h_i * (float(ry) + float(rh) * 0.5),
             )
 
-    # OCR comparisons
+    # OCR 对比
     ocr_runs: List[Dict[str, Any]] = []
     anchor_results: List[Dict[str, Any]] = []
 
@@ -473,7 +473,7 @@ async def main() -> int:
 
                 anchor_results.append(entry)
 
-    # Round-trip on deterministic points
+    # 确定性测试点的 round-trip 映射
     det_roundtrip: List[Dict[str, Any]] = []
     for p in det_points:
         ip = p["imagePoint"]
@@ -499,7 +499,7 @@ async def main() -> int:
             }
         )
 
-    # Build annotation: draw all successful OCR boxes + their centers
+    # 构建标注图：把所有成功的 OCR 框及其中心点画上去
     rects: List[Rect] = []
     points: List[ImagePoint] = []
 

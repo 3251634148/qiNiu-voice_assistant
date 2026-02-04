@@ -15,7 +15,7 @@ logger = logging.getLogger("backend_py.llm")
 
 
 class LLMService:
-    """DashScope Qwen via OpenAI-compatible API."""
+    """千问（DashScope）OpenAI 兼容模式调用封装。"""
 
     def __init__(self) -> None:
         self.stub_enabled = str(os.getenv("VOICE_ASSISTANT_LLM_STUB", "")).strip().lower() in {"1", "true", "yes"}
@@ -52,8 +52,10 @@ class LLMService:
             "- 当用户说‘随便/随机/来点音乐’等泛化请求时，不要把这些词当成歌曲名；应该基于当前的上下文语境，选择一首用户此时可能想听的真实存在的歌名作为 query，并使用 music_ui(player=\"kugou\", action=\"search\", query=...)\n"
             "- 支持多步任务：当一个目标需要多个步骤（例如先打开应用再发送消息），优先使用 execute_workflow，一次性给出 steps\n"
             "- 仅可使用以下工具：play_music、music_ui、media_control、stop_music、open_app、write_article、write_file、write_run_code、file_control、run_tests、execute_workflow\n"
-            "- music_ui 用于通过 UI 自动化控制音乐播放器（例如酷狗/Apple Music 的搜索播放、收藏随机播放等）。这是高风险操作，通常需要用户确认\n"
-            "- 当用户明确说‘我喜欢/收藏’并要求‘第一首’时，使用 music_ui(player=\"kugou\", action=\"favorites_first\")\n"
+            "- music_ui 用于通过 UI 自动化控制音乐播放器（例如酷狗/Apple Music 的搜索播放、我喜欢列表播放等）。这是高风险操作，通常需要用户确认\n"
+            "- 当用户要求播放‘我喜欢/喜欢的歌’时，使用 music_ui(player=\"kugou\", action=\"favorites_first\")\n"
+            "  - 如果用户说‘第一首’，可加 pickMode=\"first\"\n"
+            "  - 如果用户说‘随机/随便’，可加 pickMode=\"random\"\n"
             "- media_control 用于系统媒体键兜底（播放/暂停、上一首、下一首、音量、当前曲目信息等），通常不需要确认\n"
             "- send_message（企业微信/飞书/微信等 API）当前不启用，因为密钥信息难以获得\n"
             "- run_tests 用于在指定工作目录运行单测命令（高风险，通常需要用户确认）\n"
@@ -94,10 +96,15 @@ class LLMService:
                         },
                         "action": {
                             "type": "string",
-                            "enum": ["random_favorites", "favorites_first", "playlist", "search"],
-                            "description": "操作类型：收藏随机/我喜欢第一首/指定歌单/搜索播放",
+                            "enum": ["favorites_first", "playlist", "search"],
+                            "description": "操作类型：我喜欢播放/指定歌单/搜索播放",
                         },
                         "query": {"type": "string", "description": "歌单名或搜索关键词（playlist/search 时需要）"},
+                        "pickMode": {
+                            "type": "string",
+                            "enum": ["first", "random"],
+                            "description": "在我喜欢列表中选歌方式（favorites_first 可选）：first=第一首，random=随机一首",
+                        },
                         "debug": {"type": "boolean", "description": "是否返回调试信息（可选）"},
                         "dryRun": {"type": "boolean", "description": "只演练不点击（可选）"},
                     },
@@ -273,14 +280,23 @@ class LLMService:
         say = "好的。"
         intent_actions: list[dict[str, Any]] = []
 
-        if ("我喜欢" in user_text or "喜欢的歌" in user_text) and ("第一首" in user_text or "第一首歌" in user_text):
-            say = "我可以在酷狗打开我喜欢并播放第一首，这需要你确认一下。"
-            args = {"player": "kugou", "action": "favorites_first", "debug": True}
+        if "我喜欢" in user_text or "喜欢的歌" in user_text or "我喜爱" in user_text:
+            pick_mode = "first"
+            if "随机" in user_text or "随便" in user_text:
+                pick_mode = "random"
+                say = "我可以在酷狗打开我喜欢并随机播放一首，这需要你确认一下。"
+            elif "第一首" in user_text or "第一首歌" in user_text:
+                pick_mode = "first"
+                say = "我可以在酷狗打开我喜欢并播放第一首，这需要你确认一下。"
+            else:
+                say = "我可以在酷狗打开我喜欢并播放一首歌，这需要你确认一下。"
+
+            args = {"player": "kugou", "action": "favorites_first", "pickMode": pick_mode, "debug": True}
             tool_calls = [_tool_call("music_ui", args)]
             intent_actions = [{"name": "music_ui", "arguments": args}]
 
         elif any(k in user_text for k in ["播放", "帮我播放", "给我放", "我想听", "我要听", "来一首", "来首", "放一首", "放", "听"]):
-            # Best-effort normalization for E2E stability (stub-only).
+            # 尽力而为的 query 归一化（仅用于 stub 的 E2E 稳定性）。
             q = user_text
             for prefix in [
                 "帮我播放",
@@ -301,6 +317,10 @@ class LLMService:
                 q = q.replace(prefix, " ")
             q = q.replace("的", " ")
             q = " ".join(q.split())
+
+            # 对泛化/随机请求的确定性 stub 兜底（避免测试不稳定）。
+            if q in {"随机", "随便", "来点音乐", "来点歌", "听歌", "听音乐"}:
+                q = "周杰伦 告白气球"
 
             if q:
                 say = f"我可以用酷狗搜索并播放“{q}”。这需要你确认一下。"

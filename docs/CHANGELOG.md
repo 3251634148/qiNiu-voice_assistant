@@ -1,19 +1,58 @@
+## 2026-02-04
+
+### 📝 代码注释中文化
+- `backend_py/services/music_controller.py`：将所有英文注释/docstring 翻译为中文（约 70+ 处）
+- `test_scripts/debug_kugou_search_flow.py`：英文注释中文化
+- `test_scripts/debug_kugou_coord_roundtrip.py`：英文注释中文化
+- `test_scripts/debug_kugou_search_entry_locator.py`：英文注释中文化
+- `test_scripts/debug_kugou_searchbox_calib.py`：英文注释中文化
+- `test_scripts/debug_kugou_panel_back_locator.py`：英文注释/docstring 中文化
+- `test_scripts/debug_kugou_sidebar_music_calib.py`：英文注释/docstring 中文化
+- `test_scripts/debug_kugou_sidebar_music_click_probe.py`：英文注释/docstring 中文化
+- `test_scripts/debug_kugou_search_service_ocr_fallback.py`：英文注释中文化
+- `test_scripts/debug_ocr_vision_kugou.py`：英文注释/docstring 中文化（约 30+ 处）
+- `test_scripts/debug_wecom_coord_calibration.py`：英文注释/docstring 中文化
+- `test_scripts/test_e2e_socketio_music_flow.py`：英文注释中文化
+- `test_scripts/test_music_intent_random_query.py`：英文注释中文化
+
+### 📝 修改的文件
+- `backend_py/services/music_controller.py`
+- `test_scripts/debug_kugou_*.py`（7个文件）
+- `test_scripts/debug_ocr_vision_kugou.py`
+- `test_scripts/debug_wecom_coord_calibration.py`
+- `test_scripts/test_e2e_socketio_music_flow.py`
+- `test_scripts/test_music_intent_random_query.py`
+- `docs/CHANGELOG.md`
+
 ## 2026-02-03
 
 ### ✨ 功能增强
 - `backend_py/services/macos_ui_automation.py`：`click_at_debug` 新增 `cursorShots`（`screencapture -C` 光标截图）落盘，用“视觉 + mouseAfterClick/deltaAfterClick”双证据证明真实点击点。
 - `backend_py/services/macos_ui_automation.py`：`screenMeta` 新增多口径 `globalMaxY`（`globalMaxYByScreens/globalMaxYInferred/globalMaxYUsed`），并落盘 `inferMeta`（同点双 API 采样推断：`appkitY + quartzY`）。
 - `backend_py/services/macos_ui_automation.py`：修复窗口截图坐标→屏幕点击坐标的 Y 换算口径，避免在多屏环境下产生系统性纵向偏移导致“看起来乱点”。
+- `backend_py/services/macos_ui_automation.py`：新增 `scroll_wheel`（Quartz 滚轮事件）供 UI 自动化滚动使用。
 - `test_scripts/debug_wecom_coord_calibration.py`：新增企微截图坐标校准脚本（可选 warp 光标），将企微读数与多口径坐标输出到 `ui_debug/<runId>/`。
+- `backend_py/services/music_controller.py`：重做 `favorites_first` 为“我的 → 内容区音乐 → 我喜欢 → 右侧半边栏选歌播放”，并支持 `pickMode=first/random`。
 
 ### 🔧 问题修复
 - `backend_py/services/music_controller.py`：修复 KuGou 进入搜索页验证 ROI 过窄导致 OCR 截断（“取消”→“取”、漏掉“历史搜索”）从而触发多轮无效点击重试的问题；新增 `top_search_verify` 并对“历史搜索”拆词做容错。
-- `backend_py/services/music_controller.py`：KuGou OCR v2 播放改为“单击目标歌曲名 + 底栏播放确认”；在点击侧边栏前新增窗口归一化（居中 + 1152×801），并删除对“播放全部”的依赖。
+- `backend_py/services/music_controller.py`：KuGou OCR v2 播放改为“单击目标歌曲名”；移除对底栏进度条的播放确认校验（避免底栏不稳定导致假失败）。
 - `backend_py/services/music_controller.py`：KuGou v2 在 `kugou_song_list` 步骤改用专用 ROI 识别歌曲标题（避免标题左侧被裁剪）；当找不到目标歌曲时，额外落盘 `kugou_song_list_roi_crop_*` 与 `kugou_song_list_ocr_boxes_*` 证据文件便于复盘。
+- `backend_py/services/music_controller.py`：修复 KuGou “我喜欢（favorites_first）”工作流不稳定：
+  - 先判定是否已在“我的-音乐”内容区，必要时才点击顶部“音乐”tab（避免 ROI 采样到内容卡片导致找不到“音乐”）
+  - “我喜欢”入口使用专用 ROI + 过滤异常宽框，降低误点“已购音乐”概率
+  - 增加右侧半边栏打开成功宽松校验（候选关键词命中≥3）
+  - 补齐证据链：落盘 `kugou_favorites_ocr_boxes_*` / `kugou_favorites_roi_crop_*`，并在成功/失败都写 `kugou_favorites_summary_*`
+- `backend_py/controllers/conversation_controller.py`：删除后端“随机听歌”关键词识别与内置候选曲库兜底；随机听歌改为由 LLM 直接生成真实 `query` 并统一走 `music_ui(kugou/search)`。
+- `backend_py/safety.py` / `backend_py/services/llm_service.py` / `backend_py/services/music_controller.py`：下线 `random_favorites` 动作枚举，避免模型/后端能力不一致。
 
 ### 📝 修改的文件
+- `backend_py/controllers/conversation_controller.py`
+- `backend_py/safety.py`
+- `backend_py/services/llm_service.py`
 - `backend_py/services/macos_ui_automation.py`
 - `backend_py/services/music_controller.py`
+- `backend_py/services/tool_router.py`
 - `test_scripts/debug_wecom_coord_calibration.py`
 - `docs/CHANGELOG.md`
 

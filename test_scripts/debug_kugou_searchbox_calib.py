@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """KuGou search box click calibration.
 
-目的：用自动化方式扫描“顶部可能是搜索框”的区域，逐点：点击 -> 粘贴固定文本 -> 截图。
+目的：用自动化方式扫描"顶部可能是搜索框"的区域，逐点：点击 -> 粘贴固定文本 -> 截图。
 通过截图证据判断：哪些点能把文本送进搜索框（或能打开搜索入口/页面）。
 
 输出：
@@ -23,7 +23,7 @@ import sys
 import time
 from typing import Any, Dict, List
 
-# Ensure project root is importable when running as a script.
+# 确保以脚本方式运行时能导入项目根目录。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -104,7 +104,7 @@ async def main() -> int:
     ui = MacOSUIAutomation()
     await ui.ensure_accessibility_ready()
 
-    # Bring KuGou to front.
+    # 置前酷狗。
     subprocess.run(["open", "-a", "酷狗音乐"], capture_output=True, text=True, check=False)
     try:
         await ui.activate_app("酷狗音乐")
@@ -120,13 +120,13 @@ async def main() -> int:
     results: List[Dict[str, Any]] = []
     base = ui._debug_dir()  # pylint: disable=protected-access
 
-    # Baseline capture before any attempt.
+    # 基线截图（开始任何尝试之前）。
     start_cap = await ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag="calib_start")
     results.append({"step": "start", "capture": start_cap})
 
-    # Optional: try exit song detail page.
-    # 说明：在“歌曲/评论/相关”的详情页，左上角会有一个向下箭头（返回）。
-    # 先尝试一组常见“返回/退出”快捷键，再用小网格点击去定位可用的返回按钮坐标。
+    # 可选：尝试退出歌曲详情页。
+    # 说明：在"歌曲/评论/相关"的详情页，左上角会有一个向下箭头（返回）。
+    # 先尝试一组常见"返回/退出"快捷键，再用小网格点击去定位可用的返回按钮坐标。
     if args.try_exit_detail:
         key_attempts = [
             {"name": "escape", "fn": lambda: ui.key_code(53)},
@@ -149,9 +149,9 @@ async def main() -> int:
             results.append(entry)
 
         # NOTE: 根据校准结果，按键（如 Escape / Cmd+[ / Cmd+1）可以稳定从详情页回到首页。
-        # 这里不再进行“左上角网格点击返回”以避免误点首页卡片导致再次进入详情页。
+        # 这里不再进行"左上角网格点击返回"以避免误点首页卡片导致再次进入详情页。
 
-    # Re-capture after exit attempts.
+    # 退出尝试后重新截图。
     post_exit_cap = await ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag="calib_after_exit")
     results.append({"step": "after_exit", "capture": post_exit_cap})
 
@@ -199,7 +199,7 @@ async def main() -> int:
                     "stderr": (proc.stderr or "").strip(),
                 }
 
-            # Paste (ASCII text) instead of typing to avoid IME interference.
+            # 用粘贴（ASCII 文本）代替输入，避免输入法干扰。
             try:
                 await ui.hotkey("v", modifiers=["command down"])
             except Exception as e:
@@ -212,14 +212,14 @@ async def main() -> int:
             except Exception as e:
                 entry["focus"] = {"ok": False, "error": str(e)}
 
-            # Screenshot after paste.
+            # 粘贴后截图。
             tag = f"calib_{idx}_x{x_ratio:.3f}_y{y_ratio:.3f}"
             try:
                 entry["capture"] = await ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag=tag)
             except Exception as e:
                 entry["capture"] = {"error": str(e), "tag": tag}
 
-            # Cleanup: Cmd+A + Delete (best-effort).
+            # 清理：Cmd+A 全选 + Delete 删除（尽量完成）。
             try:
                 await ui.hotkey("a", modifiers=["command down"])
                 await asyncio.sleep(0.05)

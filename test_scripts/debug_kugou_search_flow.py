@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-# Ensure project root is importable when running as a script.
+# 确保以脚本方式运行时能导入项目根目录。
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -150,7 +150,7 @@ async def main() -> int:
         print(f"WROTE_RESULTS={out_path}")
         return 0
 
-    # Bring KuGou to front.
+    # 置前酷狗。
     subprocess.run(["open", "-a", "酷狗音乐"], capture_output=True, text=True, check=False)
     try:
         await ui.activate_app("酷狗音乐")
@@ -167,8 +167,8 @@ async def main() -> int:
 
     results: Dict[str, Any] = {"runId": run_id, "meta": vars(args), "steps": []}
 
-    # Always go to home first (user requirement). In practice KuGou may start on a song detail page,
-    # so we attempt a small set of "exit detail" shortcuts before forcing Cmd+1.
+    # 先回到首页（用户要求）。实际情况酷狗可能停在某首歌的详情页，
+    # 所以先尝试一组"退出详情"的快捷键，再强制 Cmd+1。
     key_attempts = [
         {"name": "escape", "fn": lambda: ui.key_code(53)},
         {"name": "cmd_left_bracket", "fn": lambda: ui.hotkey("[", modifiers=["command down"])},
@@ -189,7 +189,7 @@ async def main() -> int:
             entry["capture"] = {"error": str(e), "tag": f"flow_exit_{name}"}
         results["steps"].append(entry)
 
-    # Force home again (best-effort).
+    # 再强制回首页（兜底）。
     try:
         await ui.hotkey("1", modifiers=["command down"])
     except Exception:
@@ -238,22 +238,22 @@ async def main() -> int:
     pasted = await ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag="flow_query_pasted")
     results["steps"].append({"step": "query_pasted", "click": input_pt, "capture": pasted})
 
-    # 4) Prefer selecting the first dropdown suggestion (often leads to a stable search context).
-    await ui.key_code(125)  # Down
+    # 4) 优先选下拉联想的第一条（通常能得到更稳定的搜索上下文）。
+    await ui.key_code(125)  # 下箭头
     await asyncio.sleep(0.12)
-    await ui.key_code(36)  # Enter
+    await ui.key_code(36)  # 回车
     await asyncio.sleep(0.9)
     after_suggest = await ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag="flow_after_suggest")
     results["steps"].append({"step": "after_suggest", "capture": after_suggest})
 
-    # 5) Ensure search results are visible.
-    await ui.key_code(36)  # Enter (best-effort)
+    # 5) 确保搜索结果已显示。
+    await ui.key_code(36)  # 回车（兜底）
     await asyncio.sleep(1.1)
     after_search = await ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag="flow_after_search")
     results["steps"].append({"step": "after_search", "capture": after_search})
 
-    # 6) Try to play the first result.
-    # Click a configurable point (can be tuned) then press Enter.
+    # 6) 尝试播放第一条结果。
+    # 点击可配置的点位（可调）然后按回车。
     play_pt = _map_point(args.x_play, args.y_play)
     await ui.click_at(play_pt["x"], play_pt["y"], clicks=1)
     await asyncio.sleep(0.12)
