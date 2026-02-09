@@ -2637,16 +2637,16 @@ class MusicController:
 
                 # 优先用 pHash 验证，避免因界面微小变化导致的误报。
                 if base_phash and after_phash and dist < phash_threshold:
-                        raise RuntimeError(
-                            "已执行 OCR 优先酷狗搜索/播放流程，但未能可靠判定进入搜索结果页。"
-                            f"已导出前后截图：{before_path} / {after_path}"
-                        )
+                    raise RuntimeError(
+                        "已执行 OCR 优先酷狗搜索/播放流程，但未能可靠判定进入搜索结果页。"
+                        f"已导出前后截图：{before_path} / {after_path}"
+                    )
 
-                    if before_hash and after_hash and before_hash == after_hash:
-                        raise RuntimeError(
-                            "已执行 OCR 优先酷狗搜索/播放流程，但界面未发生变化，判定未进入搜索或未触发播放。"
-                            f"已导出前后截图：{before_path} / {after_path}"
-                        )
+                if before_hash and after_hash and before_hash == after_hash:
+                    raise RuntimeError(
+                        "已执行 OCR 优先酷狗搜索/播放流程，但界面未发生变化，判定未进入搜索或未触发播放。"
+                        f"已导出前后截图：{before_path} / {after_path}"
+                    )
 
                 return {"message": f"已在酷狗搜索并尝试播放第一首：{query}", "debug": debug_info if debug else None}
 

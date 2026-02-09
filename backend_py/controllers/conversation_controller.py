@@ -160,10 +160,18 @@ class ConversationController:
     def update_tts_settings(self, sid: str, settings: Dict[str, Any]) -> Dict[str, Any]:
         try:
             session = self.session_store.get_or_create(sid)
+            # 兼容前端旧字段：
+            # - 旧版会传 model（sambert-xxx），新版会传 voice（Cherry/Ethan/...）。
+            # - 由于本次切换到 Omni TTS，sambert model 不再用于后端合成，仅保留为兼容存储字段。
+            raw_voice = settings.get("voice")
+            if not isinstance(raw_voice, str) or not raw_voice.strip():
+                raw_voice = settings.get("model") if isinstance(settings.get("model"), str) else None
+
             tts = {
                 "gender": settings.get("gender") or "female",
                 "rate": float(settings.get("rate") or 1.0),
                 "pitch": float(settings.get("pitch") or 1.0),
+                "voice": str(raw_voice).strip() if raw_voice else session.tts_settings.get("voice"),
                 "model": settings.get("model") or session.tts_settings.get("model"),
                 "allowLocalControl": settings.get("allowLocalControl")
                 if isinstance(settings.get("allowLocalControl"), bool)
@@ -186,7 +194,7 @@ class ConversationController:
             return {
                 "success": True,
                 "settings": session.tts_settings
-                or {"gender": "female", "rate": 1.0, "pitch": 1.0, "model": None},
+                or {"gender": "female", "rate": 1.0, "pitch": 1.0, "voice": "Cherry", "model": None},
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -638,6 +646,7 @@ class ConversationController:
                     voice_settings,
                     on_audio_chunk=on_chunk,
                     cancel_event=cancel_event,
+                    request_id=effective_request_id,
                 )
 
                 # 无论是否有完整音频，都发送 completion，避免前端一直等待。
@@ -776,7 +785,7 @@ class ConversationController:
         if result.get("success") and (result.get("result") or {}).get("message"):
             msg = (result.get("result") or {}).get("message")
             voice_settings = session.tts_settings or {"gender": "female", "rate": 1.0, "pitch": 1.0}
-            audio = await self.tts_service.text_to_speech(msg, voice_settings)
+            audio = await self.tts_service.text_to_speech(msg, voice_settings, request_id=session.current_request_id)
             await self.sio.emit(
                 "audio-response",
                 {

@@ -10,52 +10,64 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type VoiceItem = { label: string; model: string; gender: "male" | "female"; desc: string };
+type VoiceItem = {
+  label: string;
+  voice: string;
+  gender: "male" | "female";
+  desc: string;
+};
 
+// qwen3-omni-flash-2025-12-01 支持的音色（前端保存 voice 到 localStorage，并透传给后端）
 const VOICES: VoiceItem[] = [
-  { label: "知楠", model: "sambert-zhinan-v1", gender: "male", desc: "广告男声" },
-  { label: "知琪", model: "sambert-zhiqi-v1", gender: "female", desc: "温柔女声" },
-  { label: "知厨", model: "sambert-zhichu-v1", gender: "male", desc: "舌尖男声" },
-  { label: "知德", model: "sambert-zhide-v1", gender: "male", desc: "新闻男声" },
-  { label: "知佳", model: "sambert-zhijia-v1", gender: "female", desc: "标准女声" },
-  { label: "知茹", model: "sambert-zhiru-v1", gender: "female", desc: "新闻播报" },
-  { label: "知倩", model: "sambert-zhiqian-v1", gender: "female", desc: "配音解说、新闻播报" },
-  { label: "知祥", model: "sambert-zhixiang-v1", gender: "male", desc: "磁性男声" },
-  { label: "知薇", model: "sambert-zhiwei-v1", gender: "female", desc: "萝莉女声" },
-  { label: "知浩", model: "sambert-zhihao-v1", gender: "male", desc: "咨询男声" },
-  { label: "知婧", model: "sambert-zhijing-v1", gender: "female", desc: "严厉女声" },
-  { label: "知茗", model: "sambert-zhiming-v1", gender: "male", desc: "诙谐男声" },
-  { label: "知墨", model: "sambert-zhimo-v1", gender: "male", desc: "情感男声" },
-  { label: "知娜", model: "sambert-zhina-v1", gender: "female", desc: "浙普女声" },
-  { label: "知树", model: "sambert-zhishu-v1", gender: "male", desc: "资讯男声" },
-  { label: "知莎", model: "sambert-zhistella-v1", gender: "female", desc: "知性女声" },
-  { label: "知婷", model: "sambert-zhiting-v1", gender: "female", desc: "电台女声" },
-  { label: "知笑", model: "sambert-zhixiao-v1", gender: "female", desc: "资讯女声" },
-  { label: "知雅", model: "sambert-zhiya-v1", gender: "female", desc: "严厉女声" },
-  { label: "知晔", model: "sambert-zhiye-v1", gender: "male", desc: "青年男声" },
-  { label: "知颖", model: "sambert-zhiying-v1", gender: "female", desc: "软萌童声" },
-  { label: "知媛", model: "sambert-zhiyuan-v1", gender: "female", desc: "知心姐姐" },
-  { label: "知悦", model: "sambert-zhiyue-v1", gender: "female", desc: "客服温柔女声" },
-  { label: "知柜", model: "sambert-zhigui-v1", gender: "female", desc: "直播女声" },
-  { label: "知硕", model: "sambert-zhishuo-v1", gender: "male", desc: "自然男声" },
-  { label: "知妙", model: "sambert-zhimiao-emo-v1", gender: "female", desc: "多情感女声" },
-  { label: "知猫", model: "sambert-zhimao-v1", gender: "female", desc: "直播女声" },
-  { label: "知伦", model: "sambert-zhilun-v1", gender: "male", desc: "悬疑解说" },
-  { label: "知飞", model: "sambert-zhifei-v1", gender: "male", desc: "激昂解说" },
-  { label: "知达", model: "sambert-zhida-v1", gender: "male", desc: "标准男声" },
-  { label: "Camila", model: "sambert-camila-v1", gender: "female", desc: "西班牙语女声" },
-  { label: "Perla", model: "sambert-perla-v1", gender: "female", desc: "意大利语女声" },
-  { label: "Indah", model: "sambert-indah-v1", gender: "female", desc: "印尼语女声" },
-  { label: "Clara", model: "sambert-clara-v1", gender: "female", desc: "法语女声" },
-  { label: "Hanna", model: "sambert-hanna-v1", gender: "female", desc: "德语女声" },
-  { label: "Beth", model: "sambert-beth-v1", gender: "female", desc: "美式英文女声" },
-  { label: "Betty", model: "sambert-betty-v1", gender: "female", desc: "客服女声" },
-  { label: "Cally", model: "sambert-cally-v1", gender: "female", desc: "自然女声" },
-  { label: "Cindy", model: "sambert-cindy-v1", gender: "female", desc: "对话女声" },
-  { label: "Eva", model: "sambert-eva-v1", gender: "female", desc: "陪伴女声" },
-  { label: "Donna", model: "sambert-donna-v1", gender: "female", desc: "教育女声" },
-  { label: "Brian", model: "sambert-brian-v1", gender: "male", desc: "美式英文男声" },
-  { label: "Waan", model: "sambert-waan-v1", gender: "female", desc: "泰语女声" },
+  { label: "芊悦", voice: "Cherry", gender: "female", desc: "阳光积极、亲切自然小姐姐" },
+  { label: "苏瑶", voice: "Serena", gender: "female", desc: "温柔小姐姐" },
+  { label: "晨煦", voice: "Ethan", gender: "male", desc: "标准普通话，阳光温暖" },
+  { label: "千雪", voice: "Chelsie", gender: "female", desc: "二次元虚拟女友" },
+  { label: "茉兔", voice: "Momo", gender: "female", desc: "撒娇搞怪，逗你开心" },
+  { label: "十三", voice: "Vivian", gender: "female", desc: "拽拽的、可爱的小暴躁" },
+  { label: "月白", voice: "Moon", gender: "male", desc: "率性帅气" },
+  { label: "四月", voice: "Maia", gender: "female", desc: "知性与温柔" },
+  { label: "凯", voice: "Kai", gender: "male", desc: "耳朵的一场SPA" },
+  { label: "不吃鱼", voice: "Nofish", gender: "male", desc: "不会翘舌音的设计师" },
+  { label: "萌宝", voice: "Bella", gender: "female", desc: "喝酒不打醉拳的小萝莉" },
+  { label: "詹妮弗", voice: "Jennifer", gender: "female", desc: "电影质感般美语女声" },
+  { label: "甜茶", voice: "Ryan", gender: "male", desc: "节奏拉满，戏感炸裂" },
+  { label: "卡捷琳娜", voice: "Katerina", gender: "female", desc: "御姐音色" },
+  { label: "艾登", voice: "Aiden", gender: "male", desc: "美语大男孩" },
+  { label: "沧明子", voice: "Eldric Sage", gender: "male", desc: "沉稳睿智的老者" },
+  { label: "乖小妹", voice: "Mia", gender: "female", desc: "温顺乖巧" },
+  { label: "沙小弥", voice: "Mochi", gender: "female", desc: "聪明伶俐" },
+  { label: "燕铮莺", voice: "Bellona", gender: "female", desc: "声音洪亮，吐字清晰" },
+  { label: "田叔", voice: "Vincent", gender: "male", desc: "沙哑烟嗓" },
+  { label: "萌小姬", voice: "Bunny", gender: "female", desc: "萌属性小萝莉" },
+  { label: "阿闻", voice: "Neil", gender: "male", desc: "新闻主持人" },
+  { label: "墨讲师", voice: "Elias", gender: "male", desc: "严谨又会讲故事" },
+  { label: "徐大爷", voice: "Arthur", gender: "male", desc: "质朴嗓音" },
+  { label: "邻家妹妹", voice: "Nini", gender: "female", desc: "又软又黏" },
+  { label: "诡婆婆", voice: "Ebona", gender: "female", desc: "低语恐怖氛围" },
+  { label: "小婉", voice: "Seren", gender: "female", desc: "助眠声线" },
+  { label: "顽屁小孩", voice: "Pip", gender: "male", desc: "调皮童真" },
+  { label: "少女阿月", voice: "Stella", gender: "female", desc: "迷糊少女音" },
+  { label: "博德加", voice: "Bodega", gender: "male", desc: "西班牙大叔" },
+  { label: "索尼莎", voice: "Sonrisa", gender: "female", desc: "拉美大姐" },
+  { label: "阿列克", voice: "Alek", gender: "male", desc: "战斗民族" },
+  { label: "多尔切", voice: "Dolce", gender: "male", desc: "意大利大叔" },
+  { label: "素熙", voice: "Sohee", gender: "female", desc: "韩国欧尼" },
+  { label: "小野杏", voice: "Ono Anna", gender: "female", desc: "青梅竹马" },
+  { label: "莱恩", voice: "Lenn", gender: "male", desc: "德国青年" },
+  { label: "埃米尔安", voice: "Emilien", gender: "male", desc: "法国大哥哥" },
+  { label: "安德雷", voice: "Andre", gender: "male", desc: "沉稳男声" },
+  { label: "拉迪奥·戈尔", voice: "Radio Gol", gender: "male", desc: "足球诗人" },
+  { label: "上海-阿珍", voice: "Jada", gender: "female", desc: "沪上阿姐" },
+  { label: "北京-晓东", voice: "Dylan", gender: "male", desc: "北京话少年" },
+  { label: "南京-老李", voice: "Li", gender: "male", desc: "耐心老师" },
+  { label: "陕西-秦川", voice: "Marcus", gender: "male", desc: "老陕味道" },
+  { label: "闽南-阿杰", voice: "Roy", gender: "male", desc: "市井活泼" },
+  { label: "天津-李彼得", voice: "Peter", gender: "male", desc: "相声捧哏" },
+  { label: "四川-晴儿", voice: "Sunny", gender: "female", desc: "甜甜川妹子" },
+  { label: "四川-程川", voice: "Eric", gender: "male", desc: "成都男子" },
+  { label: "粤语-阿强", voice: "Rocky", gender: "male", desc: "幽默陪聊" },
+  { label: "粤语-阿清", voice: "Kiki", gender: "female", desc: "港妹闺蜜" },
 ];
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
@@ -65,7 +77,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     voiceRate: 1.0,
     voicePitch: 1.0,
     allowLocalControl: true,
-    voiceModel: "sambert-zhishuo-v1",
+    voiceModel: "Cherry",
   });
   const [savedSettings, setSavedSettings] = useState<AppSettings>(settings);
   const [isLoading, setIsLoading] = useState(false);
@@ -81,7 +93,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           voiceRate: parsed.voiceRate ?? 1.0,
           voicePitch: parsed.voicePitch ?? 1.0,
           allowLocalControl: parsed.allowLocalControl ?? true,
-          voiceModel: parsed.voiceModel ?? "sambert-zhishuo-v1",
+          voiceModel: parsed.voiceModel ?? "Cherry",
         } as AppSettings;
         setSettings(merged);
         setSavedSettings(merged);
@@ -97,6 +109,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       gender: settings.voiceGender,
       rate: settings.voiceRate,
       pitch: settings.voicePitch,
+      voice: settings.voiceModel,
+      // 兼容后端旧字段：仍然透传一份 model
       model: settings.voiceModel,
       allowLocalControl: settings.allowLocalControl,
     });
@@ -111,7 +125,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       voiceRate: 1.0,
       voicePitch: 1.0,
       allowLocalControl: true,
-      voiceModel: "sambert-zhishuo-v1",
+      voiceModel: "Cherry",
     };
     setSettings(defaultSettings);
   };
@@ -162,16 +176,16 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     <div className="space-y-2">
                       {VOICES.filter((v) => v.gender === "male").map((v) => (
                         <button
-                          key={v.model}
+                          key={v.voice}
                           onClick={() =>
                             setSettings((prev) => ({
                               ...prev,
-                              voiceModel: v.model,
+                              voiceModel: v.voice,
                               voiceGender: "male",
                             }))
                           }
                           className={`w-full text-left px-3 py-2 rounded-md border ${
-                            settings.voiceModel === v.model
+                            settings.voiceModel === v.voice
                               ? "border-blue-500 bg-blue-50 text-blue-700"
                               : "border-gray-200 hover:border-gray-300"
                           }`}
@@ -188,16 +202,16 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     <div className="space-y-2">
                       {VOICES.filter((v) => v.gender === "female").map((v) => (
                         <button
-                          key={v.model}
+                          key={v.voice}
                           onClick={() =>
                             setSettings((prev) => ({
                               ...prev,
-                              voiceModel: v.model,
+                              voiceModel: v.voice,
                               voiceGender: "female",
                             }))
                           }
                           className={`w-full text-left px-3 py-2 rounded-md border ${
-                            settings.voiceModel === v.model
+                            settings.voiceModel === v.voice
                               ? "border-blue-500 bg-blue-50 text-blue-700"
                               : "border-gray-200 hover:border-gray-300"
                           }`}

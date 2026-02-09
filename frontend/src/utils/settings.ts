@@ -11,7 +11,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   voiceRate: 1.0,
   voicePitch: 1.0,
   allowLocalControl: true,
-  voiceModel: "sambert-zhishuo-v1",
+  voiceModel: "Cherry",
 };
 
 export function getSettings(): AppSettings {

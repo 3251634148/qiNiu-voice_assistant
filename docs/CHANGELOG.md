@@ -1,3 +1,30 @@
+## 2026-02-09
+
+### 🔧 问题修复
+- `backend_py/services/music_controller.py`：修复第 2639-2649 行缩进错误（IndentationError），两个 `if` 判断块（pHash 验证 和 SHA256 验证）的 `raise` 语句及第二个 `if` 缩进层级不正确，导致服务启动失败
+
+### ✨ 功能增强
+- `backend_py/services/asr_service.py`：STT 切换到 `qwen3-omni-flash-2025-12-01`（OpenAI 兼容模式，多模态 `input_audio` 输入），并输出 `dashscopeRequestId`/`responseId` 便于排障
+- `backend_py/services/tts_service.py`：TTS 增强读稿一致性：对输入文本增加 `<READ_TEXT>` 边界标签、设置低随机性参数（`temperature=0`），并对账记录模型 `delta.content`，用于定位“UI 文本 vs 实际播报不一致”
+- `frontend/src/components/SettingsModal.tsx`：语音设置音色列表切换为 Omni 新音色，并在 `update-tts-settings` 中透传 `voice`
+- `backend_py/services/llm_service.py`：强化提示词策略：心情/随机听歌必须生成真实歌曲并走 `music_ui search`；写诗等纯文本任务默认直接产出且不反复确认
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/services/music_controller.py` | 修正 pHash/SHA256 验证分支的缩进层级 |
+| `backend_py/services/asr_service.py` | STT 切换到 Omni 兼容模式（`input_audio`），并输出 requestId 相关日志 |
+| `backend_py/services/tts_service.py` | 增强读稿一致性：标签边界 + 低随机性参数 + 文本对账日志 |
+| `backend_py/controllers/conversation_controller.py` | TTS 设置新增 `voice` 字段并将 requestId 传入 TTS |
+| `frontend/src/components/SettingsModal.tsx` | 更新音色列表与设置透传（`voice`） |
+| `frontend/src/utils/settings.ts` | 默认音色改为 `Cherry` |
+| `test_scripts/test_omni_tts_base64_buffer.py` | 新增离线可跑的 base64/音频分段解析自检 |
+| `test_scripts/test_omni_stt_payload_smoke.py` | 新增 STT 请求结构自检（不依赖 pytest） |
+| `backend_py/services/llm_service.py` | 强化提示词策略：随机心情歌走搜索；写诗等减少确认 |
+| `test_scripts/test_llm_prompt_policy_smoke.py` | 新增提示词策略自检（不依赖 pytest） |
+| `test_scripts/test_omni_tts_alignment_policy_smoke.py` | 新增 TTS 一致性策略自检（不依赖 pytest） |
+| `docs/CHANGELOG.md` | 记录本次修复与增强 |
+
 ## 2026-02-04
 
 ### 📝 代码注释中文化
