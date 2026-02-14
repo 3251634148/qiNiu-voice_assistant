@@ -42,6 +42,26 @@ export function useSocket() {
         setIsInitialized(true);
         setConnectionState({ connected: true, connecting: false });
 
+        // 同步一次前端持久化设置到后端（例如：联网开关 / 设备定位）
+        const initialSettings = getSettings();
+        try {
+          socket.updateNetworkSettings({
+            networkAccessEnabled: !!initialSettings.networkAccessEnabled,
+          });
+        } catch (error) {
+          console.log("同步联网设置失败（忽略）:", (error as any)?.message);
+        }
+
+        try {
+          socket.updateDeviceLocation({
+            deviceLocationEnabled: !!initialSettings.deviceLocationEnabled,
+            lonLat: initialSettings.deviceLocationLonLat,
+            tsMs: initialSettings.deviceLocationTsMs,
+          });
+        } catch (error) {
+          console.log("同步设备定位失败（忽略）:", (error as any)?.message);
+        }
+
         // 设置事件监听器 - 只在第一次连接时设置
         socket.onSpeechRecognized((data) => {
           const currentRequestId = activeRequestIdRef.current;
@@ -488,17 +508,90 @@ export function useSocket() {
   );
 
   const sendTextCommand = useCallback(
-    (text: string) => {
-      if (socketRef.current) {
-        // stopSpeaking 会短暂拉起 stopAllRef，这里切换到新 requestId 时立刻解除
-        stopAllRef.current = false;
-
-        const requestId = generateRequestId();
-        activeRequestIdRef.current = requestId;
-
-        addMessage("user", text, { requestId });
-        socketRef.current.sendTextCommand(text, requestId);
+    async (text: string) => {
+      if (!socketRef.current) {
+        return;
       }
+
+      // stopSpeaking 会短暂拉起 stopAllRef，这里切换到新 requestId 时立刻解除
+      stopAllRef.current = false;
+
+      const trimmed = String(text || "").trim();
+      const settings = getSettings();
+      const requestId = generateRequestId();
+      activeRequestIdRef.current = requestId;
+
+      const shouldRefreshLocation =
+        !!settings.deviceLocationEnabled
+        && /天气|气温|温度|预报|下雨|降雨|湿度|风|定位|位置|我在哪|我在哪里|在哪儿|在什么地方|当前位置/.test(trimmed);
+
+      const nowMs = Date.now();
+      const isCachedFresh =
+        !!settings.deviceLocationLonLat
+        && !!settings.deviceLocationTsMs
+        && nowMs - Number(settings.deviceLocationTsMs || 0) <= 30 * 60 * 1000;
+
+      // 先把“缓存中的最新坐标”同步到后端，避免新会话/sid 丢坐标。
+      if (shouldRefreshLocation && isCachedFresh) {
+        try {
+          socketRef.current.updateDeviceLocation({
+            deviceLocationEnabled: true,
+            lonLat: settings.deviceLocationLonLat,
+            tsMs: settings.deviceLocationTsMs,
+          });
+        } catch (error) {
+          console.log("同步缓存设备定位失败（忽略）:", (error as any)?.message);
+        }
+      }
+
+      if (shouldRefreshLocation && "geolocation" in navigator) {
+        try {
+          const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: true,
+              timeout: 6000,
+              maximumAge: 0,
+            });
+          });
+
+          const lonLat = `${pos.coords.longitude},${pos.coords.latitude}`;
+          const tsMs = Date.now();
+
+          // 同步到后端会话态
+          socketRef.current.updateDeviceLocation({
+            deviceLocationEnabled: true,
+            lonLat,
+            tsMs,
+          });
+
+          // 同步到本地持久化（避免刷新/重连后丢失最近坐标）
+          try {
+            const nextSettings = {
+              ...settings,
+              deviceLocationLonLat: lonLat,
+              deviceLocationTsMs: tsMs,
+            };
+            localStorage.setItem("appSettings", JSON.stringify(nextSettings));
+          } catch (e) {
+            console.log("更新本地设备定位缓存失败（忽略）:", (e as any)?.message);
+          }
+        } catch (error) {
+          const message = String((error as any)?.message || "").trim();
+          console.log("刷新设备定位失败（忽略）:", message);
+
+          // 若用户本地开启了设备定位，但刷新失败且缓存也不新鲜，则提示可能回退公网IP定位。
+          if (shouldRefreshLocation && !isCachedFresh) {
+            addMessage(
+              "system",
+              "⚠️ 设备定位刷新失败，本次可能会回退到公网IP粗略定位（可能偏到广州等城市）。请检查系统定位权限或稍后重试。",
+              { requestId }
+            );
+          }
+        }
+      }
+
+      addMessage("user", trimmed, { requestId });
+      socketRef.current.sendTextCommand(trimmed, requestId);
     },
     [addMessage]
   );
@@ -548,6 +641,17 @@ export function useSocket() {
   const updateTTSSettings = useCallback((settings: any) => {
     socketRef.current?.updateTTSSettings(settings);
   }, []);
+
+  const updateNetworkSettings = useCallback((networkAccessEnabled: boolean) => {
+    socketRef.current?.updateNetworkSettings({ networkAccessEnabled });
+  }, []);
+
+  const updateDeviceLocation = useCallback(
+    (payload: { deviceLocationEnabled: boolean; lonLat?: string; tsMs?: number }) => {
+      socketRef.current?.updateDeviceLocation(payload);
+    },
+    []
+  );
 
   const getTTSSettings = useCallback(() => {
     socketRef.current?.getTTSSettings();
@@ -670,6 +774,8 @@ export function useSocket() {
     getSessionStatus,
     getSessionHistory,
     updateTTSSettings,
+    updateNetworkSettings,
+    updateDeviceLocation,
     getTTSSettings,
     getAvailableVoices,
     stopSpeaking,

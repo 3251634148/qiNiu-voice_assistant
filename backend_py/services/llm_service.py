@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from backend_py.config import settings
+from backend_py.services.network_tools_service import NetworkToolsService
 
 
 logger = logging.getLogger("backend_py.llm")
@@ -25,6 +26,7 @@ class LLMService:
 
         self.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
         self.model_default = "qwen-plus"
+        self.network_tools = NetworkToolsService()
 
         self.system_prompt = (
             "你是一位友好、自然、口语化的电脑语音助手。你的目标是和用户进行顺畅的对话式交流，理解用户的意图并把它转换为具体可执行的电脑操作或直接给出有用的回复。\n\n"
@@ -62,7 +64,20 @@ class LLMService:
             "  - 若用户没给风格/字数等细节：你必须自行采用合理默认值并直接输出成品\n"
             "  - 若用户说‘随便/都行/你决定’：你必须一步到位输出最终成品（不要只说‘我来写’）\n"
             "- 支持多步任务：当一个目标需要多个步骤（例如先打开应用再发送消息），优先使用 execute_workflow，一次性给出 steps\n"
-            "- 仅可使用以下工具：play_music、music_ui、media_control、stop_music、open_app、write_article、write_file、write_run_code、file_control、run_tests、execute_workflow\n"
+            "- 联网信息能力（若工具可用）：当你需要获取实时信息（当前时间、天气、最新新闻、刚发生的事件、互联网搜索结果）时，优先调用对应工具；不要编造\n"
+            "  - web_search：互联网搜索，返回带来源链接的摘要\n"
+            "  - get_latest_news：获取近期新闻列表（带来源链接）\n"
+            "  - get_ip_location：获取当前公网 IP 的城市/经纬度/时区（用于本地化天气；精度有限，可能存在城市级偏差）\n"
+            "  - get_weather_now：获取指定 location 的当前天气（location 可为城市/区县/LocationID/经纬度；必要时会先解析 LocationID）\n"
+            "  - get_weather_12h：获取未来 12 小时天气预报（用于判断未来是否降雨、转凉等趋势，并给出温度区间）\n"
+            "  - get_current_time：获取本地当前时间\n"
+            "  - 天气问题优先策略：\n"
+            "    1) 若系统已提供‘设备定位 lon_lat’（用户已授权）：直接用该 lon_lat 调用 get_weather_now + get_weather_12h，不要调用 get_ip_location\n"
+            "    2) 用户问‘我这里/当前位置/现在所在位置’且没有设备定位：先 get_ip_location，再用返回的 lon_lat 调用 get_weather_now + get_weather_12h\n"
+            "    3) 用户问指定城市：直接 get_weather_now(location=城市名) + get_weather_12h(location=城市名)。如遇重名可加 adm/range=cn\n"
+            "  - 天气回答必须包含：当前天气（温度/湿度/风/天气描述）+ 未来12小时温度区间（最低~最高）+ 未来趋势（例如傍晚可能下雨/转凉）+ 暖心建议（带伞/加衣等）\n"
+            "  - 失败强兜底（必须执行）：当任一联网工具返回 error，或 get_weather_now/get_weather_12h 返回 code!=200 时，必须立刻调用 web_search 用互联网结果直接回答；禁止再问用户是否要搜索；不要说接口不可用\n"
+            "- 仅可使用以下工具：play_music、music_ui、media_control、stop_music、open_app、write_article、write_file、write_run_code、file_control、run_tests、execute_workflow、web_search、get_latest_news、get_ip_location、get_weather_now、get_weather_12h、get_current_time\n"
             "- music_ui 用于通过 UI 自动化控制音乐播放器（例如酷狗/Apple Music 的搜索播放、我喜欢列表播放等）。这是高风险操作，通常需要用户确认\n"
             "- media_control 用于系统媒体键兜底（播放/暂停、上一首、下一首、音量、当前曲目信息等），通常不需要确认\n"
             "- send_message（企业微信/飞书/微信等 API）当前不启用，因为密钥信息难以获得\n"
@@ -341,6 +356,11 @@ class LLMService:
 
         return {"text": text, "toolCalls": tool_calls, "model": "stub", "usage": None}
 
+    def build_tool_definitions(self, *, include_network: bool) -> List[Dict[str, Any]]:
+        if include_network:
+            return [*self.function_definitions, *self.network_tools.get_tool_definitions()]
+        return list(self.function_definitions)
+
     async def invoke_llm(
         self,
         messages: List[Dict[str, str]],
@@ -348,6 +368,7 @@ class LLMService:
         model: Optional[str] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         max_tokens: int = 512,
+        parallel_tool_calls: bool = False,
     ) -> Dict[str, Any]:
         if self.stub_enabled:
             return self._invoke_llm_stub(messages)
@@ -355,7 +376,7 @@ class LLMService:
         used_model = model or self.model_default
         tool_defs = tools or self.function_definitions
 
-        payload = {
+        payload: Dict[str, Any] = {
             "model": used_model,
             "messages": [{"role": "system", "content": self.system_prompt}, *messages],
             "temperature": 0.7,
@@ -363,6 +384,8 @@ class LLMService:
             "tools": [{"type": "function", "function": t} for t in tool_defs],
             "tool_choice": "auto",
         }
+        if parallel_tool_calls:
+            payload["parallel_tool_calls"] = True
 
         headers = {
             "Authorization": f"Bearer {settings.dashscope_api_key}",

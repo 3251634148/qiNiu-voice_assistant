@@ -3,7 +3,10 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { useSocketContext } from "../hooks/SocketProvider";
+import type { ConfirmationRequest } from "../types";
 import type { AppSettings } from "../utils/settings";
+
+import ConfirmationDialog from "./ConfirmationDialog";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -71,17 +74,23 @@ const VOICES: VoiceItem[] = [
 ];
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const { updateTTSSettings, getTTSSettings } = useSocketContext();
+  const { updateTTSSettings, updateNetworkSettings, updateDeviceLocation, getTTSSettings } = useSocketContext();
   const [settings, setSettings] = useState<AppSettings>({
     voiceGender: "female",
     voiceRate: 1.0,
     voicePitch: 1.0,
     allowLocalControl: true,
+    networkAccessEnabled: false,
+    networkAccessGranted: false,
+    deviceLocationEnabled: false,
+    deviceLocationGranted: false,
+    deviceLocationLonLat: "",
+    deviceLocationTsMs: 0,
     voiceModel: "Cherry",
   });
   const [savedSettings, setSavedSettings] = useState<AppSettings>(settings);
   const [isLoading, setIsLoading] = useState(false);
-  const [isOnline, _setIsOnline] = useState(false);
+  const isOnline = settings.networkAccessEnabled;
 
   useEffect(() => {
     if (isOpen) {
@@ -93,6 +102,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           voiceRate: parsed.voiceRate ?? 1.0,
           voicePitch: parsed.voicePitch ?? 1.0,
           allowLocalControl: parsed.allowLocalControl ?? true,
+          networkAccessEnabled: parsed.networkAccessEnabled ?? false,
+          networkAccessGranted: parsed.networkAccessGranted ?? false,
+          deviceLocationEnabled: parsed.deviceLocationEnabled ?? false,
+          deviceLocationGranted: parsed.deviceLocationGranted ?? false,
+          deviceLocationLonLat: parsed.deviceLocationLonLat ?? "",
+          deviceLocationTsMs: parsed.deviceLocationTsMs ?? 0,
           voiceModel: parsed.voiceModel ?? "Cherry",
         } as AppSettings;
         setSettings(merged);
@@ -102,9 +117,155 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   }, [isOpen, getTTSSettings]);
 
+  const [networkConfirm, setNetworkConfirm] = useState<ConfirmationRequest | null>(null);
+  const [deviceLocationConfirm, setDeviceLocationConfirm] = useState<ConfirmationRequest | null>(null);
+
+  const persistSettings = (next: AppSettings) => {
+    localStorage.setItem("appSettings", JSON.stringify(next));
+  };
+
+  const applyNetworkAccessEnabled = (enabled: boolean, granted: boolean) => {
+    const next = {
+      ...settings,
+      networkAccessEnabled: enabled,
+      networkAccessGranted: granted,
+    } as AppSettings;
+    setSettings(next);
+
+    // 安全开关：即时生效并落盘
+    persistSettings(next);
+
+    // 同步到后端会话态
+    updateNetworkSettings(enabled);
+  };
+
+  const applyDeviceLocation = (
+    enabled: boolean,
+    granted: boolean,
+    lonLat: string = "",
+    tsMs: number = 0
+  ) => {
+    const next = {
+      ...settings,
+      deviceLocationEnabled: enabled,
+      deviceLocationGranted: granted,
+      deviceLocationLonLat: lonLat,
+      deviceLocationTsMs: tsMs,
+    } as AppSettings;
+    setSettings(next);
+
+    persistSettings(next);
+
+    updateDeviceLocation({
+      deviceLocationEnabled: enabled,
+      lonLat,
+      tsMs,
+    });
+  };
+
+  const requestDeviceLocation = () => {
+    if (!("geolocation" in navigator)) {
+      console.log("当前环境不支持 geolocation");
+      applyDeviceLocation(false, settings.deviceLocationGranted, "", 0);
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lon = pos.coords.longitude;
+        const lat = pos.coords.latitude;
+        const tsMs = Date.now();
+        const lonLat = `${lon},${lat}`;
+        applyDeviceLocation(true, true, lonLat, tsMs);
+      },
+      (err) => {
+        console.log("获取设备定位失败:", err?.message);
+        applyDeviceLocation(false, settings.deviceLocationGranted, "", 0);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 8000,
+        maximumAge: 60 * 1000,
+      }
+    );
+  };
+
+  const handleToggleDeviceLocation = () => {
+    if (settings.deviceLocationEnabled) {
+      applyDeviceLocation(false, settings.deviceLocationGranted, "", 0);
+      return;
+    }
+
+    // 开启设备定位：首次需要一次性授权（应用内确认）
+    if (!settings.deviceLocationGranted) {
+      const now = new Date();
+      setDeviceLocationConfirm({
+        id: `confirm_device_location_${now.getTime()}`,
+        riskLevel: "medium",
+        reason: "开启设备定位后，助手会向系统请求你的位置信息，用于更准确地查询当前位置天气。",
+        summary: "允许助手使用设备定位（更准确的天气定位）",
+        suggestions: ["仅用于天气定位，不会读取本地文件", "你可以随时在设置中关闭该开关"],
+        timestamp: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
+        toolCall: {
+          id: "device_location",
+          name: "device_location",
+          arguments: { deviceLocationEnabled: true },
+        },
+      });
+      return;
+    }
+
+    requestDeviceLocation();
+  };
+
+  const handleToggleNetworkAccess = () => {
+    if (settings.networkAccessEnabled) {
+      // 关闭联网：不需要二次确认
+      applyNetworkAccessEnabled(false, settings.networkAccessGranted);
+      return;
+    }
+
+    // 开启联网：首次需要一次性授权
+    if (!settings.networkAccessGranted) {
+      const now = new Date();
+      setNetworkConfirm({
+        id: `confirm_network_${now.getTime()}`,
+        riskLevel: "medium",
+        reason: "开启联网后，助手可能向第三方服务发起请求（搜索/新闻/天气），以获取实时信息。",
+        summary: "允许助手联网查询实时信息",
+        suggestions: [
+          "仅发送必要的查询参数（例如：关键词、经纬度），不会发送本地文件内容",
+          "你可以随时在设置中关闭联网",
+        ],
+        timestamp: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
+        toolCall: {
+          id: "network_access",
+          name: "network_access",
+          arguments: { networkAccessEnabled: true },
+        },
+      });
+      return;
+    }
+
+    applyNetworkAccessEnabled(true, true);
+  };
+
   const handleSave = () => {
     setIsLoading(true);
-    localStorage.setItem("appSettings", JSON.stringify(settings));
+    persistSettings(settings);
+
+    // 即使用户只点了“保存设置”，也同步一次联网开关（避免刷新后后端状态不一致）
+    updateNetworkSettings(!!settings.networkAccessEnabled);
+
+    // 同步设备定位（若已启用且已有坐标）
+    updateDeviceLocation({
+      deviceLocationEnabled: !!settings.deviceLocationEnabled,
+      lonLat: settings.deviceLocationLonLat,
+      tsMs: settings.deviceLocationTsMs,
+    });
+
     updateTTSSettings({
       gender: settings.voiceGender,
       rate: settings.voiceRate,
@@ -125,6 +286,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       voiceRate: 1.0,
       voicePitch: 1.0,
       allowLocalControl: true,
+      networkAccessEnabled: false,
+      networkAccessGranted: false,
+      deviceLocationEnabled: false,
+      deviceLocationGranted: false,
+      deviceLocationLonLat: "",
+      deviceLocationTsMs: 0,
       voiceModel: "Cherry",
     };
     setSettings(defaultSettings);
@@ -297,6 +464,53 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 />
               </button>
             </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-gray-700">允许联网查询（搜索/新闻/天气）</label>
+                <p className="text-xs text-gray-500 mt-1">
+                  开启后助手可能向第三方服务发起请求以获取实时信息（可随时关闭）
+                </p>
+              </div>
+              <button
+                onClick={handleToggleNetworkAccess}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  settings.networkAccessEnabled ? "bg-blue-600" : "bg-gray-200"
+                }`}
+                aria-label="network-access-toggle"
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    settings.networkAccessEnabled ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm font-medium text-gray-700">允许使用设备定位（更准确的天气定位）</label>
+                <p className="text-xs text-gray-500 mt-1">
+                  开启后会请求系统定位权限，用于提升“当前位置天气”准确度（可随时关闭）
+                </p>
+                {settings.deviceLocationEnabled && settings.deviceLocationLonLat ? (
+                  <p className="text-xs text-gray-500 mt-1">最近定位：{settings.deviceLocationLonLat}</p>
+                ) : null}
+              </div>
+              <button
+                onClick={handleToggleDeviceLocation}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  settings.deviceLocationEnabled ? "bg-blue-600" : "bg-gray-200"
+                }`}
+                aria-label="device-location-toggle"
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    settings.deviceLocationEnabled ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -328,6 +542,32 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           </div>
         </div>
       </div>
+
+      {networkConfirm ? (
+        <ConfirmationDialog
+          confirmation={networkConfirm}
+          onConfirm={(approved) => {
+            if (approved) {
+              applyNetworkAccessEnabled(true, true);
+            }
+            setNetworkConfirm(null);
+          }}
+          onCancel={() => setNetworkConfirm(null)}
+        />
+      ) : null}
+
+      {deviceLocationConfirm ? (
+        <ConfirmationDialog
+          confirmation={deviceLocationConfirm}
+          onConfirm={(approved) => {
+            if (approved) {
+              requestDeviceLocation();
+            }
+            setDeviceLocationConfirm(null);
+          }}
+          onCancel={() => setDeviceLocationConfirm(null)}
+        />
+      ) : null}
     </div>
   );
 

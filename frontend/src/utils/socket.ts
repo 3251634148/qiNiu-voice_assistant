@@ -182,6 +182,22 @@ class SocketService {
     this.socket.emit("update-tts-settings", settings);
   }
 
+  // 更新联网设置（一次性授权后由前端主动同步）
+  updateNetworkSettings(settings: { networkAccessEnabled: boolean }) {
+    if (!this.socket) {
+      throw new Error("未连接到服务器");
+    }
+    this.socket.emit("update-network-settings", settings);
+  }
+
+  // 更新设备定位（用于更准确的当前位置天气）
+  updateDeviceLocation(settings: { deviceLocationEnabled: boolean; lonLat?: string; tsMs?: number }) {
+    if (!this.socket) {
+      throw new Error("未连接到服务器");
+    }
+    this.socket.emit("update-device-location", settings);
+  }
+
   // 获取TTS设置
   getTTSSettings() {
     if (!this.socket) {
@@ -258,6 +274,18 @@ class SocketService {
     callback: (result: { success: boolean; settings?: any; error?: string }) => void
   ) {
     this.socket?.on("tts-settings-updated", callback);
+  }
+
+  onNetworkSettingsUpdated(
+    callback: (result: { success: boolean; networkAccessEnabled?: boolean; error?: string }) => void
+  ) {
+    this.socket?.on("network-settings-updated", callback);
+  }
+
+  onDeviceLocationUpdated(
+    callback: (result: { success: boolean; deviceLocationEnabled?: boolean; deviceLocation?: any; error?: string }) => void
+  ) {
+    this.socket?.on("device-location-updated", callback);
   }
 
   onTTSSettings(callback: (result: { success: boolean; settings?: any; error?: string }) => void) {

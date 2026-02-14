@@ -14,7 +14,7 @@ export function VoiceInput({ disabled = false }: VoiceInputProps) {
   const { isRecording, startRecording, stopRecording, toggleRecording } = useVoice(async (text) => {
     await cancel(true);
     await stopSpeaking();
-    sendTextCommand(text);
+    await sendTextCommand(text);
   }, sendVoiceInput);
   const [textInput, setTextInput] = React.useState("");
   const [isSubmitting, setIsSubmitting] = React.useState(false);
@@ -39,7 +39,7 @@ export function VoiceInput({ disabled = false }: VoiceInputProps) {
     try {
       await cancel(true);
       await stopSpeaking();
-      sendTextCommand(textInput);
+      await sendTextCommand(textInput);
       setTextInput("");
     } catch (error) {
       console.error("发送文本命令失败:", error);

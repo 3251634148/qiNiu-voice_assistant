@@ -69,6 +69,20 @@ BAIDU_TTS_SECRET_KEY=your_baidu_tts_secret_key
 
 # 调试产物 runId（可选）：用于把 ui_debug 产物落盘到固定目录
 VOICE_ASSISTANT_DEBUG_RUN=debug_run_$(date +%s)
+
+# 联网信息工具（可选）：需前端开启“联网查询”开关后生效
+SERPAPI_API_KEY=your_serpapi_api_key_here
+NEWSDATA_API_KEY=your_newsdata_api_key_here
+
+# QWeather（推荐 JWT 方式）
+QWEATHER_API_HOST=your_qweather_api_host_here
+QWEATHER_JWT_SUB=your_project_id_here
+QWEATHER_JWT_KID=your_credential_id_here
+QWEATHER_JWT_PRIVATE_KEY_PATH=/absolute/path/to/ed25519-private.pem
+QWEATHER_JWT_TTL_SECONDS=3600
+
+# （兼容）旧版 Key 方式：若未配置 JWT 才会回退使用
+QWEATHER_API_KEY=your_qweather_api_key_here
 ```
 
 ## 项目结构

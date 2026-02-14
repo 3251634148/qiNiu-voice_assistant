@@ -164,6 +164,18 @@ async def update_tts_settings(sid: str, data: Dict[str, Any]) -> None:
     await sio.emit("tts-settings-updated", result, to=sid)
 
 
+@sio.on("update-network-settings")
+async def update_network_settings(sid: str, data: Dict[str, Any]) -> None:
+    result = controller.update_network_settings(sid, data or {})
+    await sio.emit("network-settings-updated", result, to=sid)
+
+
+@sio.on("update-device-location")
+async def update_device_location(sid: str, data: Dict[str, Any]) -> None:
+    result = controller.update_device_location(sid, data or {})
+    await sio.emit("device-location-updated", result, to=sid)
+
+
 @sio.on("get-tts-settings")
 async def get_tts_settings(sid: str) -> None:
     result = controller.get_tts_settings(sid)

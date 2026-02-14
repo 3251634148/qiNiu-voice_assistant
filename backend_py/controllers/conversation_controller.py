@@ -13,6 +13,7 @@ import socketio
 from backend_py.safety import RiskAssessment, SafetyService
 from backend_py.services.asr_service import ASRService
 from backend_py.services.llm_service import LLMService
+from backend_py.services.network_tools_service import NetworkToolsService
 from backend_py.services.system_controller import SystemController
 from backend_py.services.tool_router import ToolRouter
 from backend_py.services.tts_service import TTSService
@@ -29,6 +30,7 @@ class ConversationController:
         self.safety_service = SafetyService()
         self.system_controller = SystemController()
         self.llm_service = LLMService()
+        self.network_tools_service = NetworkToolsService()
         self.tts_service = TTSService()
         self.asr_service = ASRService()
         self.tool_router = ToolRouter(llm_service=self.llm_service)
@@ -188,6 +190,62 @@ class ConversationController:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def update_network_settings(self, sid: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+        """更新联网开关（前端一次性授权后持久化，并同步到后端会话态）。"""
+
+        try:
+            session = self.session_store.get_or_create(sid)
+            enabled = settings.get("networkAccessEnabled")
+            if not isinstance(enabled, bool):
+                return {"success": False, "error": "networkAccessEnabled 必须是布尔值"}
+
+            session.network_access_enabled = enabled
+            return {"success": True, "networkAccessEnabled": session.network_access_enabled}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def update_device_location(self, sid: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """更新设备定位信息（更准确的当前位置）。
+
+        说明：
+        - 该能力必须由前端一次性授权后才会启用。
+        - 后端只保存必要的经纬度与时间戳，不做持久化落盘。
+        """
+
+        try:
+            session = self.session_store.get_or_create(sid)
+
+            enabled = payload.get("deviceLocationEnabled")
+            if not isinstance(enabled, bool):
+                return {"success": False, "error": "deviceLocationEnabled 必须是布尔值"}
+
+            session.device_location_enabled = enabled
+
+            if not enabled:
+                session.device_location = None
+                return {"success": True, "deviceLocationEnabled": False}
+
+            lon_lat = str(payload.get("lonLat") or "").strip()
+            try:
+                ts_ms = int(payload.get("tsMs") or 0)
+            except Exception:
+                ts_ms = 0
+
+            if not lon_lat:
+                return {"success": False, "error": "lonLat 不能为空"}
+
+            if ts_ms <= 0:
+                ts_ms = int(time.time() * 1000)
+
+            session.device_location = {"lonLat": lon_lat, "tsMs": ts_ms}
+            return {
+                "success": True,
+                "deviceLocationEnabled": True,
+                "deviceLocation": session.device_location,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     def get_tts_settings(self, sid: str) -> Dict[str, Any]:
         try:
             session = self.session_store.get_or_create(sid)
@@ -249,15 +307,49 @@ class ConversationController:
             normalized["reason"] = reason
         return normalized
 
+    @staticmethod
+    def _sanitize_say_text(text: str) -> str:
+        """把模型协议输出清洗为可直接对用户展示/朗读的纯文本。
+
+        兼容：
+        - 英文/中文冒号（: / ：）
+        - SAY 与冒号之间存在空格（例如 "SAY :"）
+        - 输出前存在 BOM 或空白
+        """
+
+        t = str(text or "").lstrip("\ufeff").strip()
+        if not t:
+            return ""
+
+        lines = t.splitlines()
+        if not lines:
+            return ""
+
+        # 如果第一行还是协议行，则丢弃它。
+        if re.match(r"^\s*INTENT_JSON\s*[:：]", lines[0]):
+            lines = lines[1:]
+
+        if not lines:
+            return ""
+
+        # 剥离首行 SAY 前缀（兼容中英文冒号与空格）。
+        lines[0] = re.sub(r"^\s*SAY\s*[:：]\s*", "", lines[0])
+
+        # 兜底：如果整体又以 SAY 开头（例如模型输出多了空行），再剥一次。
+        out = "\n".join(lines).strip()
+        out = re.sub(r"^\s*SAY\s*[:：]\s*", "", out).strip()
+        return out
+
     def parse_assistant_text(self, raw_text: str) -> Dict[str, Any]:
-        text = str(raw_text or "")
+        text = str(raw_text or "").lstrip("\ufeff")
         lines = text.splitlines()
         if not lines:
             return {"intent": None, "sayText": ""}
 
         first = lines[0]
-        if first.startswith("INTENT_JSON:"):
-            json_part = first[len("INTENT_JSON:") :].strip()
+        m = re.match(r"^\s*INTENT_JSON\s*[:：]\s*(\{.*\})\s*$", first)
+        if m:
+            json_part = m.group(1).strip()
             intent = None
             try:
                 intent = self.normalize_intent_object(json.loads(json_part))
@@ -265,15 +357,15 @@ class ConversationController:
                 intent = None
 
             say_lines = lines[1:]
-            if say_lines and say_lines[0].startswith("SAY:"):
-                say_lines[0] = say_lines[0][len("SAY:") :].lstrip()
+            if say_lines:
+                say_lines[0] = re.sub(r"^\s*SAY\s*[:：]\s*", "", say_lines[0])
 
-            return {"intent": intent, "sayText": "\n".join(say_lines).strip()}
+            return {"intent": intent, "sayText": self._sanitize_say_text("\n".join(say_lines))}
 
-        if text.startswith("SAY:"):
-            return {"intent": None, "sayText": text[len("SAY:") :].strip()}
+        if re.match(r"^\s*SAY\s*[:：]", first):
+            return {"intent": None, "sayText": self._sanitize_say_text(text)}
 
-        return {"intent": None, "sayText": text.strip()}
+        return {"intent": None, "sayText": self._sanitize_say_text(text)}
 
     def merge_intent_with_tool_calls(self, intent: Optional[Dict[str, Any]], tool_calls: Any) -> Dict[str, Any]:
         normalized = self.normalize_intent_object(intent) if intent else None
@@ -323,6 +415,7 @@ class ConversationController:
             calls.append(
                 {
                     "id": f"intent_{now}_{idx}_{random.randint(1000, 9999)}",
+                    "type": "function",
                     "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
                 }
             )
@@ -421,13 +514,42 @@ class ConversationController:
 
     @staticmethod
     def _is_music_request(user_text: str) -> bool:
+        """判断用户是否在请求播放音乐。
+
+        注意：这里是“后端兜底”的识别逻辑，必须尽量保守，避免越权把对话请求误判成音乐操作。
+        """
+
         t = str(user_text or "").strip()
         if not t:
             return False
 
-        if any(x in t for x in ["讲故事", "讲笑话", "念诗", "读文章", "解释"]):
+        # 强排除：对话/内容型请求不应触发音乐兜底（哪怕包含“听/讲/说”等字眼）。
+        negative = [
+            "故事",
+            "讲故事",
+            "听故事",
+            "笑话",
+            "段子",
+            "念诗",
+            "诗",
+            "读文章",
+            "朗读",
+            "解释",
+            "讲解",
+            "科普",
+            "翻译",
+            "总结",
+            "复述",
+            "陪我聊",
+            "聊天",
+            "对话",
+            "视频",
+            "电影",
+        ]
+        if any(x in t for x in negative):
             return False
 
+        # 正向信号：必须出现较明确的“音乐/听歌/点歌/播放一首”类表达。
         keywords = [
             "听歌",
             "听音乐",
@@ -436,21 +558,409 @@ class ConversationController:
             "来点音乐",
             "来点歌",
             "放点歌",
-            "播放",
+            "点歌",
+            "随机听歌",
+            "随机播放",
             "来一首",
             "来首",
             "放一首",
-            "听",
+            "播放",
         ]
         return any(k in t for k in keywords)
+
+    @staticmethod
+    def _is_weather_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+
+        keywords = [
+            "天气",
+            "气温",
+            "温度",
+            "预报",
+            "下雨",
+            "降雨",
+            "雨",
+            "湿度",
+            "风",
+            "体感",
+            "冷不冷",
+            "热不热",
+        ]
+        return any(k in t for k in keywords)
+
+    @staticmethod
+    def _contains_explicit_location_hint(user_text: str) -> bool:
+        """判断用户是否在文本中显式指定了地点。
+
+        说明：
+        - 该函数只用于“是否应强制使用设备定位”的决策，因此必须偏保守：
+          只要疑似出现了具体地点，就返回 True，避免把“北京天气”误当作当前位置。
+        """
+
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+
+        # 1) 明确坐标或 LocationID
+        if re.search(r"-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?", t):
+            return True
+        if re.search(r"\b\d{6,12}\b", t):
+            return True
+
+        # 2) 类地名后缀（市/区/县/镇等）
+        if re.search(r"[\u4e00-\u9fff]{1,10}(?:市|区|县|镇|乡|村|街道)", t):
+            return True
+
+        # 3) 典型模式：<疑似地点><天气/温度/预报>
+        # 排除时间词（例如“今天/现在”），避免把“今天天气”误判为地点。
+        excluded = {
+            "今天",
+            "明天",
+            "后天",
+            "现在",
+            "今晚",
+            "今夜",
+            "早上",
+            "上午",
+            "下午",
+            "傍晚",
+            "晚上",
+            "中午",
+            "凌晨",
+            "今日",
+            "本周",
+            "这周",
+            "这几天",
+            "最近",
+        }
+        m = re.search(r"([\u4e00-\u9fff]{2,8})(?:的)?(?:今天|现在|明天|后天)?(?:天气|气温|温度|预报)", t)
+        if m:
+            candidate = str(m.group(1) or "").strip()
+            if candidate and candidate not in excluded and candidate not in {"这里", "我这", "我这里", "当前位置"}:
+                return True
+
+        return False
+
+    @staticmethod
+    def _is_location_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+
+        keywords = [
+            "定位",
+            "位置",
+            "我在哪",
+            "我在哪里",
+            "在哪儿",
+            "在什么地方",
+            "当前位置",
+            "我现在在哪",
+        ]
+        return any(k in t for k in keywords)
+
+    def _should_prefer_device_location(self, user_text: str) -> bool:
+        """当用户问“天气/定位”但没指定地点时，优先使用设备定位。
+
+        例如：
+        - “今天天气怎么样？” ✅ 使用设备定位
+        - “我现在的定位是在哪里？” ✅ 使用设备定位
+        - “深圳今天天气怎么样？” ❌ 不强制使用设备定位（由模型按用户指定城市查询）
+        """
+
+        if not (self._is_weather_request(user_text) or self._is_location_request(user_text)):
+            return False
+
+        return not self._contains_explicit_location_hint(user_text)
 
     @staticmethod
     def _make_tool_call(name: str, args: Dict[str, Any], *, prefix: str) -> Dict[str, Any]:
         now = int(time.time() * 1000)
         return {
             "id": f"{prefix}_{now}_{random.randint(1000, 9999)}",
+            "type": "function",
             "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
         }
+
+    @staticmethod
+    def _tool_name_from_call(tool_call: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(tool_call, dict):
+            return None
+        fn = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else None
+        name = fn.get("name") if isinstance(fn, dict) else tool_call.get("name")
+        return name if isinstance(name, str) and name.strip() else None
+
+    async def _maybe_run_network_tool_loop(
+        self,
+        *,
+        sid: str,
+        request_id: str,
+        user_text: str,
+        messages: List[Dict[str, str]],
+        llm_resp: Dict[str, Any],
+        tool_defs: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """当且仅当 tool_calls 全部属于“联网工具”时，执行工具回填循环。
+
+        说明：
+        - 这样可以避免“工具集合里混入本地执行工具”导致的未回填 tool_call_id 问题。
+        - 只有在用户开启联网开关时，本方法才会被调用。
+        """
+
+        tool_calls = llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
+        if not tool_calls:
+            return llm_resp
+
+        names = [self._tool_name_from_call(tc) for tc in tool_calls]
+        if not names or any(n is None for n in names):
+            return llm_resp
+
+        if not all(self.network_tools_service.is_network_tool(n) for n in names if n):
+            return llm_resp
+
+        loop_messages: List[Dict[str, Any]] = list(messages)
+        current = llm_resp
+
+        # tool-loop 执行时可读取 session 中的设备定位（用于修复 location=auto 导致的错误地理解析）。
+        session = self.session_store.get_or_create(sid)
+        device_lon_lat = None
+        if bool(getattr(session, "device_location_enabled", False)) and isinstance(getattr(session, "device_location", None), dict):
+            device_lon_lat = str((session.device_location or {}).get("lonLat") or "").strip() or None
+
+        for round_idx in range(3):
+            tool_calls = current.get("toolCalls") if isinstance(current.get("toolCalls"), list) else []
+            if not tool_calls:
+                return current
+
+            names = [self._tool_name_from_call(tc) for tc in tool_calls]
+            if not names or any(n is None for n in names):
+                return current
+            if not all(self.network_tools_service.is_network_tool(n) for n in names if n):
+                return current
+
+            # 记录本轮 tool_calls（含解析后的参数），用于定位“location=auto”等问题。
+            try:
+                tc_dbg = []
+                for tc in tool_calls[:10]:
+                    name = self._tool_name_from_call(tc) or ""
+                    args = None
+                    fn = tc.get("function") if isinstance(tc.get("function"), dict) else None
+                    if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                        try:
+                            args = json.loads(fn.get("arguments") or "{}")
+                        except Exception:
+                            args = fn.get("arguments")
+                    tc_dbg.append({"name": name, "args": args})
+
+                self.network_tools_service.dump_debug_artifact(
+                    request_id=request_id,
+                    tag=f"net_tool_calls_round_{round_idx}",
+                    payload={
+                        "requestId": request_id,
+                        "round": round_idx,
+                        "userText": user_text,
+                        "toolCalls": tc_dbg,
+                    },
+                )
+            except Exception:
+                pass
+
+            # 把 assistant 的 tool_calls 追加到 messages（用于下一轮回填）。
+            loop_messages.append(
+                {
+                    "role": "assistant",
+                    "content": current.get("text") or "",
+                    "tool_calls": tool_calls,
+                }
+            )
+
+            async def _exec_one(tc: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
+                tool_call_id = str(tc.get("id") or "")
+                tool_name = self._tool_name_from_call(tc) or ""
+                args_raw = (tc.get("function") or {}).get("arguments") if isinstance(tc.get("function"), dict) else None
+                args_obj: Dict[str, Any] = {}
+                if isinstance(args_raw, str) and args_raw.strip():
+                    try:
+                        args_obj = json.loads(args_raw)
+                    except Exception:
+                        args_obj = {}
+
+                # 修复：模型经常传 location="auto"，若直接走 Geo lookup 会误匹配到无关城市。
+                # 当本会话已启用设备定位时，强制把 auto/current/here 等占位符改写为 device lon_lat。
+                override_reason = None
+                if tool_name in {"get_weather_now", "get_weather_12h"} and device_lon_lat:
+                    raw_loc = args_obj.get("location")
+                    raw_loc_s = str(raw_loc or "").strip().lower()
+                    if raw_loc_s in {"", "auto", "current", "here", "local"}:
+                        args_obj["location"] = device_lon_lat
+                        override_reason = f"override_location_{raw_loc_s or 'empty'}_to_device_lon_lat"
+
+                if override_reason:
+                    self.network_tools_service.dump_debug_artifact(
+                        request_id=request_id,
+                        tag="location_override",
+                        payload={
+                            "requestId": request_id,
+                            "round": round_idx,
+                            "toolCallId": tool_call_id,
+                            "tool": tool_name,
+                            "reason": override_reason,
+                            "deviceLonLat": device_lon_lat,
+                        },
+                    )
+
+                req_payload = {
+                    "meta": {
+                        "requestId": request_id,
+                        "round": round_idx,
+                        "toolCallId": tool_call_id,
+                        "tool": tool_name,
+                    },
+                    "arguments": args_obj,
+                }
+                self.network_tools_service.dump_debug_artifact(
+                    request_id=request_id,
+                    tag=f"net_tool_request_{tool_name}",
+                    payload=req_payload,
+                )
+
+                try:
+                    result = await self.network_tools_service.execute(
+                        name=tool_name,
+                        arguments=args_obj,
+                        request_id=request_id,
+                    )
+                    self.network_tools_service.dump_debug_artifact(
+                        request_id=request_id,
+                        tag=f"net_tool_response_{tool_name}",
+                        payload=result.debug_payload,
+                    )
+                    return (tool_call_id, result.content_for_model, {"ok": True, "tool": tool_name, "args": args_obj})
+                except Exception as e:
+                    err_payload = {
+                        "tool": tool_name,
+                        "ok": False,
+                        "error": str(e),
+                        "meta": {"requestId": request_id, "round": round_idx, "toolCallId": tool_call_id},
+                    }
+                    self.network_tools_service.dump_debug_artifact(
+                        request_id=request_id,
+                        tag=f"net_tool_error_{tool_name}",
+                        payload=err_payload,
+                    )
+                    return (
+                        tool_call_id,
+                        json.dumps({"error": str(e)}, ensure_ascii=False),
+                        {"ok": False, "tool": tool_name, "args": args_obj, "error": str(e)},
+                    )
+
+            # 并行执行本轮所有网络工具
+            results = await asyncio.gather(*[_exec_one(tc) for tc in tool_calls])
+
+            ip_city = None
+            ip_region = None
+            last_weather_query = None
+            weather_ok = True
+            any_failed = False
+
+            for tool_call_id, content, meta in results:
+                loop_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": str(content or ""),
+                    }
+                )
+
+                any_failed = any_failed or (not bool(meta.get("ok")))
+
+                tool_name = str(meta.get("tool") or "")
+                if tool_name == "get_ip_location" and meta.get("ok") is True:
+                    try:
+                        obj = json.loads(str(content or "{}"))
+                        if isinstance(obj, dict):
+                            ip_city = str(obj.get("city") or "").strip() or ip_city
+                            ip_region = str(obj.get("region") or "").strip() or ip_region
+                    except Exception:
+                        pass
+
+                if tool_name in {"get_weather_now", "get_weather_12h"}:
+                    last_weather_query = str((meta.get("args") or {}).get("location") or "").strip() or last_weather_query
+                    try:
+                        obj = json.loads(str(content or "{}"))
+                        if isinstance(obj, dict):
+                            code = str(obj.get("code") or "").strip()
+                            if code and code != "200":
+                                weather_ok = False
+                    except Exception:
+                        # 无法解析则视为失败
+                        weather_ok = False
+
+            # 兜底策略：任何一步失败（或天气 code!=200）都不追问用户，直接 web_search 并让模型总结。
+            if any_failed or (weather_ok is False):
+                place = ""
+                if last_weather_query and (not last_weather_query.isdigit()) and "," not in last_weather_query:
+                    place = last_weather_query
+                elif ip_city:
+                    place = f"{ip_city}{ip_region or ''}".strip()
+                else:
+                    place = "当前所在地"
+
+                fallback_query = f"{place} 实时天气 未来12小时 温度 天气 风 降雨 湿度"
+
+                fallback_call = {
+                    "id": f"fallback_web_search_{int(time.time() * 1000)}_{random.randint(1000, 9999)}",
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "arguments": json.dumps({"query": fallback_query, "num": 5}, ensure_ascii=False),
+                    },
+                }
+
+                self.network_tools_service.dump_debug_artifact(
+                    request_id=request_id,
+                    tag="net_tool_fallback_web_search",
+                    payload={
+                        "meta": {"requestId": request_id, "round": round_idx},
+                        "reason": "network_tools_failed_or_weather_non_200",
+                        "userText": user_text,
+                        "query": fallback_query,
+                    },
+                )
+
+                loop_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [fallback_call],
+                    }
+                )
+
+                fb_id, fb_content, _fb_meta = await _exec_one(fallback_call)
+                loop_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": fb_id,
+                        "content": str(fb_content or ""),
+                    }
+                )
+
+                current = await self.llm_service.invoke_llm(
+                    loop_messages,
+                    tools=tool_defs,
+                    parallel_tool_calls=True,
+                )
+                return current
+
+            current = await self.llm_service.invoke_llm(
+                loop_messages,
+                tools=tool_defs,
+                parallel_tool_calls=True,
+            )
+
+        return current
 
     async def handle_text_command(self, *, sid: str, text: Any, request_id: Optional[str]) -> None:
         effective_request_id = request_id.strip() if isinstance(request_id, str) and request_id.strip() else self._gen_request_id(sid)
@@ -482,12 +992,164 @@ class ConversationController:
             if m.get("type") in {"user", "assistant"}
         ]
 
-        llm_resp = await self.llm_service.invoke_llm(messages)
-        parsed = self.parse_assistant_text(llm_resp.get("text"))
-        response_text = parsed.get("sayText") or ""
-        intent = self.merge_intent_with_tool_calls(parsed.get("intent"), llm_resp.get("toolCalls"))
+        # 若用户已授权“设备定位”，则把坐标作为系统上下文提供给模型。
+        # 目的：避免仅靠公网 IP 定位导致城市级偏差（例如深圳误判为广州）。
+        device_loc = getattr(session, "device_location", None)
+        if bool(getattr(session, "device_location_enabled", False)) and isinstance(device_loc, dict):
+            lon_lat = str(device_loc.get("lonLat") or "").strip()
+            ts_ms = device_loc.get("tsMs")
+            try:
+                ts_ms_i = int(ts_ms) if ts_ms is not None else None
+            except Exception:
+                ts_ms_i = None
 
-        tool_calls = llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
+            # 位置过旧就不作为强信号（例如用户移动了位置）。默认 24 小时有效。
+            now_ms = int(time.time() * 1000)
+            age_ms = None
+
+            is_fresh = False
+            if ts_ms_i is not None:
+                age_ms = max(0, now_ms - ts_ms_i)
+                is_fresh = age_ms <= (24 * 60 * 60 * 1000)
+
+            should_prefer = bool(lon_lat) and bool(is_fresh) and self._should_prefer_device_location(user_text)
+
+            self.network_tools_service.dump_debug_artifact(
+                request_id=effective_request_id,
+                tag="device_location_decision",
+                payload={
+                    "requestId": effective_request_id,
+                    "userText": user_text,
+                    "device": {
+                        "enabled": bool(getattr(session, "device_location_enabled", False)),
+                        "lonLat": lon_lat or None,
+                        "tsMs": ts_ms_i,
+                        "ageMs": age_ms,
+                        "isFresh": bool(is_fresh),
+                    },
+                    "decision": {
+                        "shouldPrefer": bool(should_prefer),
+                        "isWeatherRequest": bool(self._is_weather_request(user_text)),
+                        "isLocationRequest": bool(self._is_location_request(user_text)),
+                        "hasExplicitLocationHint": bool(self._contains_explicit_location_hint(user_text)),
+                    },
+                },
+            )
+
+            if should_prefer:
+                # 放在最前面的 system，尽量提高“必须使用设备坐标”的约束强度。
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "系统定位信息（用户已授权设备定位）："
+                            f"lon_lat={lon_lat}。"
+                            "当用户问天气或定位且未指定具体地点时（例如‘今天天气怎么样？’、‘天气预报’、‘我现在在哪？’），"
+                            "一律视为问当前位置：必须优先用该 lon_lat。"
+                            "若查询天气，使用 get_weather_now + get_weather_12h；"
+                            "若用户问定位，直接根据 lon_lat 回答经纬度，不要调用 get_ip_location 也不要猜城市名。"
+                        ),
+                    },
+                    *messages,
+                ]
+
+        include_network = bool(session.network_access_enabled)
+        tool_defs = self.llm_service.build_tool_definitions(include_network=include_network)
+
+        llm_resp = await self.llm_service.invoke_llm(
+            messages,
+            tools=tool_defs,
+            parallel_tool_calls=include_network,
+        )
+
+        # 兼容：模型可能把“联网工具调用意图”写在 INTENT_JSON.actions 中，而不是 tool_calls。
+        # 对于联网工具，我们必须走 tool-loop 回填，再让模型总结输出，避免被 SafetyService 当作“未知工具”拦截。
+        if include_network and not (llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []):
+            parsed_first = self.parse_assistant_text(llm_resp.get("text"))
+            intent_first = self.merge_intent_with_tool_calls(parsed_first.get("intent"), [])
+            synthesized = self.build_tool_calls_from_intent(intent_first)
+            if synthesized and all(
+                self.network_tools_service.is_network_tool(self._tool_name_from_call(tc) or "")
+                for tc in synthesized
+            ):
+                # 记录本轮“从 INTENT_JSON.actions 合成”的 tool_calls（否则后续 llm_resp 可能不带 toolCalls）。
+                try:
+                    tc_dbg = []
+                    for tc in synthesized[:10]:
+                        name = self._tool_name_from_call(tc) or ""
+                        args = None
+                        fn = tc.get("function") if isinstance(tc.get("function"), dict) else None
+                        if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                            try:
+                                args = json.loads(fn.get("arguments") or "{}")
+                            except Exception:
+                                args = fn.get("arguments")
+                        tc_dbg.append({"name": name, "args": args})
+
+                    self.network_tools_service.dump_debug_artifact(
+                        request_id=effective_request_id,
+                        tag="synthesized_tool_calls",
+                        payload={
+                            "requestId": effective_request_id,
+                            "userText": user_text,
+                            "toolCalls": tc_dbg,
+                        },
+                    )
+                except Exception:
+                    pass
+
+                llm_resp = {**llm_resp, "toolCalls": synthesized, "text": ""}
+
+        if include_network:
+            llm_resp = await self._maybe_run_network_tool_loop(
+                sid=sid,
+                request_id=effective_request_id,
+                user_text=user_text,
+                messages=messages,
+                llm_resp=llm_resp,
+                tool_defs=tool_defs,
+            )
+
+        # 记录“本次模型/工具最终是否使用了 IP 定位/使用了哪个 location 参数”，便于复盘。
+        try:
+            tool_calls_raw_dbg = llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
+            tc_dbg = []
+            for tc in tool_calls_raw_dbg[:10]:
+                name = self._tool_name_from_call(tc) or ""
+                args = None
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else None
+                if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        args = fn.get("arguments")
+                tc_dbg.append({"name": name, "args": args})
+
+            self.network_tools_service.dump_debug_artifact(
+                request_id=effective_request_id,
+                tag="location_tool_calls",
+                payload={
+                    "requestId": effective_request_id,
+                    "userText": user_text,
+                    "toolCalls": tc_dbg,
+                },
+            )
+        except Exception:
+            pass
+
+        parsed = self.parse_assistant_text(llm_resp.get("text"))
+        response_text = self._sanitize_say_text(parsed.get("sayText") or "")
+
+        tool_calls_raw = llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
+        # 重要：联网工具的 tool_calls 只允许走“工具回填循环”，不能走 ToolRouter。
+        tool_calls = [
+            tc
+            for tc in tool_calls_raw
+            if not self.network_tools_service.is_network_tool(self._tool_name_from_call(tc) or "")
+        ]
+
+        intent = self.merge_intent_with_tool_calls(parsed.get("intent"), tool_calls)
+
         tool_calls_from_intent = [] if tool_calls else self.build_tool_calls_from_intent(intent)
         selected_tool_calls = tool_calls or tool_calls_from_intent
 
@@ -717,6 +1379,23 @@ class ConversationController:
 
             session = self.session_store.get_or_create(sid)
             allow_local = self.is_local_control_allowed(sid)
+
+            # 防御性兜底：联网工具不应走 ToolRouter/SafetyService；它们必须在 handle_text_command 的 tool-loop 中执行并回填。
+            if self.network_tools_service.is_network_tool(str(name or "").strip()):
+                msg = "联网查询未开启，请在设置里打开“允许联网查询”后再试。"
+                if session.network_access_enabled:
+                    msg = "联网查询已开启，但本次请求未走联网工具回填链路。请重试该问题。"
+                await self.sio.emit(
+                    "assistant-message",
+                    {
+                        "type": "system",
+                        "content": msg,
+                        "toolCall": parsed_tool_call,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    },
+                    to=sid,
+                )
+                continue
 
             risk = self.safety_service.validate_tool_call(parsed_tool_call, allow_local_control=allow_local)
             if not risk.allowed:

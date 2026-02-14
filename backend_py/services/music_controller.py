@@ -218,6 +218,55 @@ def _compose_roi(
     return (bx + sx * bw, by + sy * bh, bw * sw, bh * sh)
 
 
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _parse_roi_csv(value: str) -> Optional[tuple[float, float, float, float]]:
+    """解析 `x,y,w,h` 形式的 ROI 字符串。
+
+    - 允许空白
+    - 解析失败返回 None
+    - 会做 0..1 范围裁剪，且保证 w/h 不越界
+    """
+
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(parts) != 4:
+        return None
+
+    try:
+        x = _clamp01(float(parts[0]))
+        y = _clamp01(float(parts[1]))
+        w = _clamp01(float(parts[2]))
+        h = _clamp01(float(parts[3]))
+    except Exception:
+        return None
+
+    w = max(0.0, min(1.0 - x, w))
+    h = max(0.0, min(1.0 - y, h))
+    if w <= 0.0 or h <= 0.0:
+        return None
+
+    return (x, y, w, h)
+
+
+def _roi_from_env(env_name: str, *, default: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    """从环境变量读取 ROI 覆盖值。
+
+    用途：酷狗 UI 主题/版本升级时，允许不改代码快速调整 ROI。
+
+    例：
+        export KUGOU_RECOMMEND_TABS_STRICT_ROI="0.10,0.03,0.70,0.06"
+    """
+
+    parsed = _parse_roi_csv(os.environ.get(env_name, ""))
+    return parsed if parsed else tuple(float(x) for x in default)
+
+
 # 酷狗窗口截图用的归一化 ROI（左上为原点）。
 KUGOU_ROIS: dict[str, tuple[float, float, float, float]] = {
     "full": (0.0, 0.0, 1.0, 1.0),
@@ -235,8 +284,23 @@ KUGOU_ROIS: dict[str, tuple[float, float, float, float]] = {
     "top_search_verify": (0.12, 0.00, 0.88, 0.20),
     # 搜索框文字区域的更小 ROI（右上）。
     "search_bar": (0.60, 0.00, 0.36, 0.12),
-    # 不同版本/主题的 tab 位置不太固定，所以这里用更高一点的 ROI 覆盖两行区域。
+    # 不同版本/主题的 tab 位置不太固定，所以这里用更高一点的 ROI 覆盖两行区域（搜索/结果页状态判定用）。
     "tabs": (0.18, 0.04, 0.78, 0.40),
+
+    # “我的”页顶部 tabs（音乐/艺人/动态）严格 ROI：要求只出现这 3 个词。
+    # 该 ROI 由离线扫参脚本 `test_scripts/debug_kugou_strict_tabs_roi_calib.py` 在样本图上得到，避免把内容区（如动态列表）裁入。
+    "my_top_tabs_strict": (0.02, 0.04, 0.28, 0.06),
+
+    # 音乐主页二级 tabs（推荐/频道/歌单/歌手）严格 ROI：用于在搜索前强制回到“推荐”子页并关闭可能存在的半栏面板。
+    # 注意：该 ROI 受主题/版本影响较大；若严格校验失败，可用扫参脚本更新，或用环境变量直接覆盖：
+    #   - KUGOU_RECOMMEND_TABS_STRICT_ROI="0.10,0.03,0.70,0.06"
+    "music_recommend_tabs_strict": _roi_from_env(
+        "KUGOU_RECOMMEND_TABS_STRICT_ROI",
+        default=(0.10, 0.03, 0.70, 0.06),
+    ),
+    # 旧版 ROI：保留作为兜底候选，避免不同主题/版本下完全失效。
+    "music_recommend_tabs_strict_legacy": (0.18, 0.12, 0.56, 0.08),
+
     "result_list_top": (0.18, 0.20, 0.78, 0.45),
     "bottom_player": (0.00, 0.86, 1.00, 0.14),
 }
@@ -550,8 +614,9 @@ class MusicController:
             # 关键原则：先判定是否已经在"我的-音乐"内容区；若已就位则跳过"音乐"点击，避免 ROI 误采样导致硬失败。
             sidebar_roi = KUGOU_ROIS["sidebar"]
 
-            # 失败证据：e5f384b2-... 显示此前 ROI 采样到了内容卡片（HOYO-MiX/全部关注），而不是顶部 tab。
-            tabs_roi = KUGOU_ROIS["tabs"]
+            # “我的页顶部 tabs（音乐/艺人/动态）”严格 ROI。
+            # 失败证据：e5f384b2-... 显示此前用宽 ROI 会误采样到内容卡片（HOYO-MiX/全部关注），导致找不到“音乐”。
+            tabs_roi = KUGOU_ROIS["my_top_tabs_strict"]
 
             # "我的音乐页"内容区判定 ROI：覆盖"自建歌单/默认收藏/创建歌单"等锚点。
             my_music_view_detect_roi = (0.10, 0.16, 0.90, 0.64)
@@ -826,12 +891,16 @@ class MusicController:
                         "isMyMusicView": bool(is_my_music_view),
                     }
 
-                # 2.3 若未就位，则点击顶部"音乐"tab（使用 tabs ROI，而不是内容区 ROI）
+                # 2.3 若未就位，则点击“我的页顶部 tabs”的“音乐”（严格 ROI：必须且只能出现“音乐/艺人/动态”）。
                 if not is_my_music_view:
                     cap_tabs = await _capture("kugou_my_tabs_before_click")
                     tabs_path = str(cap_tabs.get("screenshotPath") or "")
                     if not tabs_path:
-                        raise RuntimeError("无法获取截图路径，无法定位顶部'音乐'tab")
+                        raise RuntimeError("无法获取截图路径，无法定位顶部 tabs")
+
+                    required_tabs_raw = ["音乐", "艺人", "动态"]
+                    required_tabs = [_norm(x) for x in required_tabs_raw]
+                    required_set = set(required_tabs)
 
                     tabs_boxes = await self.ui.ocr_screenshot_advanced(
                         tabs_path,
@@ -839,7 +908,7 @@ class MusicController:
                         scale=3.2,
                         grayscale=True,
                         accurate=False,
-                        custom_words=["音乐", "艺人", "动态", "歌单", "专辑", "视频"],
+                        custom_words=required_tabs_raw,
                     )
                     _dump_ocr_evidence(
                         stage="click_my_music_tab",
@@ -850,22 +919,53 @@ class MusicController:
                         ocr={"engine": "Vision", "scale": 3.2, "grayscale": True, "accurate": False},
                     )
 
-                    # 选择"音乐"：优先 exact，其次 contains；同时偏上偏左。
-                    target_norm = _norm("音乐")
-                    candidates: list[Any] = []
+                    # 严格校验：仅允许出现指定 tabs 文本（按 min_confidence 过滤）。
+                    min_confidence = 0.6
+                    token_set: set[str] = set()
+                    by_text: dict[str, list[Any]] = {}
                     for b in tabs_boxes:
-                        t = str(getattr(b, "text", "") or "")
-                        tn = _norm(t)
-                        if not tn:
+                        try:
+                            conf = float(getattr(b, "confidence", 0.0) or 0.0)
+                        except Exception:
+                            conf = 0.0
+                        if conf < float(min_confidence):
                             continue
-                        if tn == target_norm or target_norm in tn:
-                            candidates.append(b)
 
-                    if not candidates:
+                        t = _norm(str(getattr(b, "text", "") or ""))
+                        if not t:
+                            continue
+
+                        token_set.add(t)
+                        if t in required_set:
+                            by_text.setdefault(t, []).append(b)
+
+                    missing = [t for t in required_tabs if t not in token_set]
+                    extra = [t for t in sorted(token_set) if t not in required_set]
+
+                    debug_info.setdefault("myTopTabsStrict", []).append(
+                        {
+                            "roi": tabs_roi,
+                            "minConfidence": float(min_confidence),
+                            "tokens": sorted(token_set),
+                            "missing": missing,
+                            "extra": extra,
+                        }
+                    )
+
+                    if missing or extra or len(token_set) != len(required_set):
                         preview = [str(getattr(b, "text", "") or "") for b in tabs_boxes[:20]]
-                        raise RuntimeError(f"未能在 tabs ROI 内识别到'音乐'（preview={preview}）")
+                        raise RuntimeError(
+                            "未能通过严格 tabs ROI 校验（"
+                            f"required={required_tabs_raw}, missing={missing}, extra={extra}, tokens={sorted(token_set)}, preview={preview}）"
+                        )
 
-                    def _tab_key(b: Any) -> tuple[float, float, float]:
+                    music_key = _norm("音乐")
+                    music_boxes = by_text.get(music_key) or []
+                    if not music_boxes:
+                        preview = [str(getattr(b, "text", "") or "") for b in tabs_boxes[:20]]
+                        raise RuntimeError(f"严格 tabs ROI 已命中但未找到‘音乐’框（preview={preview}）")
+
+                    def _pick_box(b: Any) -> tuple[float, float, float]:
                         try:
                             yv = float(getattr(b, "y", 0.0) or 0.0)
                         except Exception:
@@ -874,14 +974,13 @@ class MusicController:
                             xv = float(getattr(b, "x", 0.0) or 0.0)
                         except Exception:
                             xv = 10**9
-                        # 额外：更偏窄的框优先（避免命中"热门的音乐"这种长句）
                         try:
-                            wv = float(getattr(b, "width", 0.0) or 0.0)
+                            conf = float(getattr(b, "confidence", 0.0) or 0.0)
                         except Exception:
-                            wv = 10**9
-                        return (yv, xv, wv)
+                            conf = 0.0
+                        return (yv, xv, -conf)
 
-                    tab_box = min(candidates, key=_tab_key)
+                    tab_box = min(music_boxes, key=_pick_box)
                     await _click_box_center(cap_tabs, tab_box, step="click_my_music_tab")
                     await asyncio.sleep(0.35)
 
@@ -2861,6 +2960,7 @@ class MusicController:
                 return None
 
         # 在执行任何点击之前先截一张初始状态图，便于追溯。
+        init_cap: Optional[Dict[str, Any]] = None
         try:
             init_cap = await self.ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag="kugou_flow_init")
             debug_info.setdefault("captures", []).append({"step": "kugou_flow_init", "capture": init_cap})
@@ -2869,18 +2969,77 @@ class MusicController:
         _dump_debug_info("init")
 
         # 尽早归一化窗口尺寸/位置，减少 ROI/OCR 识别的不稳定性。
+        # 性能优化：如果当前窗口已经满足目标尺寸/位置（允许少量像素误差），则跳过归一化。
+        cap_norm: Optional[Dict[str, Any]] = None
+
+        def _is_already_normalized(cap: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+            wb = cap.get("windowBounds") or {}
+            if not isinstance(wb, dict):
+                return (False, {"ok": False, "reason": "missing_windowBounds"})
+
+            try:
+                cur_w = int(round(float(wb.get("width") or 0.0)))
+                cur_h = int(round(float(wb.get("height") or 0.0)))
+                cur_x = int(round(float(wb.get("x") or 0.0)))
+                cur_y = int(round(float(wb.get("y") or 0.0)))
+            except Exception:
+                return (False, {"ok": False, "reason": "invalid_windowBounds"})
+
+            target_w = 1152
+            target_h = 801
+
+            # 复用 `normalize_process_window()` 的目标位置计算：主屏居中。
+            try:
+                screen = self.ui._get_main_screen_size()  # noqa: SLF001
+                target_x = int(max(0, round((float(screen.width) - float(target_w)) / 2.0)))
+                target_y = int(max(0, round((float(screen.height) - float(target_h)) / 2.0)))
+            except Exception as e:
+                return (False, {"ok": False, "reason": "screen_size_unavailable", "error": str(e)})
+
+            tol = 2
+            size_ok = bool(abs(cur_w - target_w) <= tol and abs(cur_h - target_h) <= tol)
+            pos_ok = bool(abs(cur_x - target_x) <= tol and abs(cur_y - target_y) <= tol)
+            ok = bool(size_ok and pos_ok)
+            return (
+                ok,
+                {
+                    "ok": bool(ok),
+                    "reason": "already_normalized" if ok else "mismatch",
+                    "tolerancePx": int(tol),
+                    "current": {"x": cur_x, "y": cur_y, "width": cur_w, "height": cur_h},
+                    "target": {"x": target_x, "y": target_y, "width": int(target_w), "height": int(target_h)},
+                    "screen": {"width": int(screen.width), "height": int(screen.height)},
+                },
+            )
+
         try:
             await _ensure_kugou_frontmost(step="kugou_window_normalize")
-            norm = await self.ui.normalize_process_window(
-                process_name="酷狗音乐",
-                width=1152,
-                height=801,
-                center_main_screen=True,
-            )
-            debug_info["windowNormalize"] = norm
-            await asyncio.sleep(0.25)
-            cap_norm = await self.ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag="kugou_window_normalized")
-            debug_info.setdefault("captures", []).append({"step": "kugou_window_normalized", "capture": cap_norm})
+
+            should_skip = False
+            skip_meta: Dict[str, Any] = {"ok": False, "reason": "no_init_cap"}
+            if init_cap is not None:
+                should_skip, skip_meta = _is_already_normalized(init_cap)
+
+            if should_skip:
+                debug_info["windowNormalize"] = {"ok": True, "skipped": True, **skip_meta}
+                cap_norm = init_cap
+                debug_info.setdefault("captures", []).append(
+                    {
+                        "step": "kugou_window_normalized",
+                        "capture": cap_norm,
+                    }
+                )
+            else:
+                norm = await self.ui.normalize_process_window(
+                    process_name="酷狗音乐",
+                    width=1152,
+                    height=801,
+                    center_main_screen=True,
+                )
+                debug_info["windowNormalize"] = {"ok": True, "skipped": False, **(norm or {})}
+                await asyncio.sleep(0.25)
+                cap_norm = await self.ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag="kugou_window_normalized")
+                debug_info.setdefault("captures", []).append({"step": "kugou_window_normalized", "capture": cap_norm})
         except Exception as e:
             _dump_debug_info("error_window_normalize_failed", error=str(e))
             raise RuntimeError(f"酷狗窗口归一化失败：{e}")
@@ -3350,9 +3509,45 @@ class MusicController:
             debug_info.setdefault("warnings", []).append("遮挡窗口关闭失败：未能在遮挡窗口顶部 ROI 内识别到可用标题锚点")
             raise RuntimeError("遮挡窗口存在，但未能通过标题锚点定位返回按钮")
 
-        async def _click_sidebar_music(*, tag: str, step_name: str) -> None:
-            cap0 = await self.ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag=tag)
-            debug_info.setdefault("captures", []).append({"step": tag, "capture": cap0})
+        async def _click_sidebar_music(
+            *,
+            tag: str,
+            step_name: str,
+            cap_hint: Optional[Dict[str, Any]] = None,
+            cap_hint_max_age_ms: int = 2000,
+        ) -> None:
+            """点击侧边栏“音乐”。
+
+            性能优化：允许复用上一张“足够新”的窗口截图作为 OCR 输入，避免重复 `screencapture`。
+
+            - `cap_hint`：候选复用截图（例如刚刚的 `kugou_window_normalized`）。
+            - `cap_hint_max_age_ms`：候选截图与当前时间的最大允许间隔。
+            """
+
+            def _extract_ts_ms_from_path(path: str) -> Optional[int]:
+                m = re.search(r"_(\d{10,})\.png$", str(path or ""))
+                if not m:
+                    return None
+                try:
+                    return int(m.group(1))
+                except Exception:
+                    return None
+
+            cap0: Dict[str, Any]
+            reused = False
+            if cap_hint is not None:
+                path_hint = str(cap_hint.get("screenshotPath") or "")
+                ts_hint = _extract_ts_ms_from_path(path_hint)
+                now_ms = int(time.time() * 1000)
+                if path_hint and ts_hint is not None and (0 <= now_ms - int(ts_hint) <= int(cap_hint_max_age_ms)):
+                    cap0 = cap_hint
+                    reused = True
+                else:
+                    cap0 = await self.ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag=tag)
+            else:
+                cap0 = await self.ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag=tag)
+
+            debug_info.setdefault("captures", []).append({"step": tag, "capture": cap0, "reused": bool(reused)})
 
             path0 = str(cap0.get("screenshotPath") or "")
             if not path0:
@@ -3446,8 +3641,14 @@ class MusicController:
             raise RuntimeError(f"侧边栏入口识别异常（preview={preview}）")
 
         # 1) 先点侧边栏"音乐"。
+        # 性能优化：优先复用 `cap_norm`（刚归一化后的截图）做 OCR，避免重复 `screencapture`。
         try:
-            await _click_sidebar_music(tag="kugou_sidebar_music", step_name="kugou_sidebar_music")
+            await _click_sidebar_music(
+                tag="kugou_sidebar_music",
+                step_name="kugou_sidebar_music",
+                cap_hint=cap_norm,
+                cap_hint_max_age_ms=2500,
+            )
             await asyncio.sleep(0.25)
         except Exception as e:
             debug_info.setdefault("warnings", []).append(f"侧边栏点击'音乐'失败（继续）：{e}")
@@ -3459,9 +3660,217 @@ class MusicController:
         iw = 0.0
         ih = 0.0
         enter_search_fallback_tries = 0
+        did_force_recommend = False
+
+        async def _force_recommend_tab(*, cap_in: Dict[str, Any], step_idx: int) -> None:
+            """尽力点击两次“推荐”，确保回到推荐子页并退出可能存在的半栏面板。
+
+            该步骤属于“稳定性护栏”，不应该因为 OCR 严格校验失败而中断整条 `search` 流程：
+            - 成功：双击“推荐”，并尽力复核 tabs 是否仍在预期 ROI 内；
+            - 失败：写入 debug_info 的 warnings 与 recommendTabsStrict，继续后续流程。
+            """
+
+            required_raw = ["推荐", "频道", "歌单", "歌手"]
+            required = [_norm(x) for x in required_raw]
+            required_set = set(required)
+
+            # 说明：推荐 tabs 文本在部分主题下对比度较低，min_confidence 过高会导致“全缺失”。
+            min_confidence = 0.45
+
+            screenshot_path = str(cap_in.get("screenshotPath") or "")
+            if not screenshot_path:
+                debug_info.setdefault("warnings", []).append("无法获取截图路径，跳过强制回到推荐子页")
+                return
+
+            roi_candidates = [
+                KUGOU_ROIS["music_recommend_tabs_strict"],
+                KUGOU_ROIS.get("music_recommend_tabs_strict_legacy", (0.18, 0.12, 0.56, 0.08)),
+            ]
+
+            # 去重（避免 env 覆盖与 legacy 一样导致重复 OCR）。
+            rois_to_try: list[tuple[float, float, float, float]] = []
+            seen: set[tuple[float, float, float, float]] = set()
+            for r in roi_candidates:
+                key = (round(r[0], 4), round(r[1], 4), round(r[2], 4), round(r[3], 4))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rois_to_try.append(r)
+
+            def _pick_box(b: Any) -> tuple[float, float, float]:
+                try:
+                    yv = float(getattr(b, "y", 0.0) or 0.0)
+                except Exception:
+                    yv = 10**9
+                try:
+                    xv = float(getattr(b, "x", 0.0) or 0.0)
+                except Exception:
+                    xv = 10**9
+                try:
+                    conf = float(getattr(b, "confidence", 0.0) or 0.0)
+                except Exception:
+                    conf = 0.0
+                return (yv, xv, -conf)
+
+            chosen_roi: Optional[tuple[float, float, float, float]] = None
+            chosen_rec_box: Optional[Any] = None
+
+            for roi_idx, roi in enumerate(rois_to_try):
+                boxes_rec = await self.ui.ocr_screenshot_advanced(
+                    screenshot_path,
+                    roi=roi,
+                    scale=3.2,
+                    grayscale=True,
+                    accurate=False,
+                    custom_words=required_raw,
+                )
+
+                token_set: set[str] = set()
+                by_text: dict[str, list[Any]] = {}
+                for b in boxes_rec:
+                    try:
+                        conf = float(getattr(b, "confidence", 0.0) or 0.0)
+                    except Exception:
+                        conf = 0.0
+                    if conf < float(min_confidence):
+                        continue
+
+                    t = _norm(str(getattr(b, "text", "") or ""))
+                    if not t:
+                        continue
+
+                    token_set.add(t)
+                    if t in required_set:
+                        by_text.setdefault(t, []).append(b)
+
+                missing = [t for t in required if t not in token_set]
+                extra = [t for t in sorted(token_set) if t not in required_set]
+
+                debug_info.setdefault("recommendTabsStrict", []).append(
+                    {
+                        "phase": "beforeClick",
+                        "step": int(step_idx),
+                        "roiIndex": int(roi_idx),
+                        "roi": roi,
+                        "minConfidence": float(min_confidence),
+                        "tokens": sorted(token_set),
+                        "missing": missing,
+                        "extra": extra,
+                    }
+                )
+
+                if missing or extra or len(token_set) != len(required_set):
+                    continue
+
+                rec_key = _norm("推荐")
+                rec_boxes = by_text.get(rec_key) or []
+                if not rec_boxes:
+                    debug_info.setdefault("warnings", []).append(
+                        f"严格推荐 tabs ROI 已命中但未找到‘推荐’框（step={step_idx}, roiIndex={roi_idx}）"
+                    )
+                    continue
+
+                chosen_roi = roi
+                chosen_rec_box = min(rec_boxes, key=_pick_box)
+                break
+
+            if not chosen_roi or chosen_rec_box is None:
+                debug_info.setdefault("warnings", []).append(
+                    f"严格推荐 tabs ROI 校验失败，跳过强制回到推荐子页（step={step_idx}）"
+                )
+                return
+
+            # 按需求：强制点击两次“推荐”。
+            await _click_box_center(cap_in, chosen_rec_box, step=f"force_recommend_click_1_{step_idx}")
+            await asyncio.sleep(0.15)
+            await _click_box_center(cap_in, chosen_rec_box, step=f"force_recommend_click_2_{step_idx}")
+            await asyncio.sleep(0.35)
+
+            # 复核：点击后仍应保持严格 tabs ROI（尽力确认处于推荐子页的稳定态；失败不阻断流程）。
+            cap2 = await self.ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag=f"kugou_recommend_verify_{step_idx}")
+            debug_info.setdefault("captures", []).append({"step": f"kugou_recommend_verify_{step_idx}", "capture": cap2})
+
+            path2 = str(cap2.get("screenshotPath") or "")
+            if not path2:
+                debug_info.setdefault("warnings", []).append("无法获取复核截图路径，跳过推荐 tabs 复核")
+                return
+
+            boxes2 = await self.ui.ocr_screenshot_advanced(
+                path2,
+                roi=chosen_roi,
+                scale=3.2,
+                grayscale=True,
+                accurate=False,
+                custom_words=required_raw,
+            )
+
+            token_set2: set[str] = set()
+            for b in boxes2:
+                try:
+                    conf = float(getattr(b, "confidence", 0.0) or 0.0)
+                except Exception:
+                    conf = 0.0
+                if conf < float(min_confidence):
+                    continue
+
+                t = _norm(str(getattr(b, "text", "") or ""))
+                if t:
+                    token_set2.add(t)
+
+            missing2 = [t for t in required if t not in token_set2]
+            extra2 = [t for t in sorted(token_set2) if t not in required_set]
+
+            debug_info.setdefault("recommendTabsStrict", []).append(
+                {
+                    "phase": "afterClick",
+                    "step": int(step_idx),
+                    "roiIndex": int(rois_to_try.index(chosen_roi)),
+                    "roi": chosen_roi,
+                    "minConfidence": float(min_confidence),
+                    "tokens": sorted(token_set2),
+                    "missing": missing2,
+                    "extra": extra2,
+                }
+            )
+
+            if missing2 or extra2 or len(token_set2) != len(required_set):
+                debug_info.setdefault("warnings", []).append(
+                    "推荐 tabs 复核失败（"
+                    f"required={required_raw}, missing={missing2}, extra={extra2}, tokens={sorted(token_set2)}）"
+                )
+
         for step in range(6):
             cap, boxes, iw, ih = await _capture_full(f"kugou_flow_state_{step}")
             state = _detect_state(boxes, iw=iw, ih=ih)
+
+            # 方案2：补充“焦点信号”兜底。
+            # 说明：有些 UI 状态下 OCR 可能漏掉“取消/历史搜索”，但实际上已经在搜索输入态。
+            # 当顶部 ROI 内出现“搜索/搜/索”任一字样且焦点为文本输入控件时，直接视为 search_view。
+            if state.get("mode") == "music_main_ready":
+                focus_info: Optional[Dict[str, Any]] = None
+                try:
+                    focus_info = await self.ui.get_focused_ui_element_info("酷狗音乐")
+                except Exception:
+                    focus_info = None
+
+                role = str((focus_info or {}).get("role") or "")
+                focus_is_text = bool((focus_info or {}).get("ok") is True and ("Text" in role or "Field" in role))
+
+                roi_top = _roi_px(KUGOU_ROIS["top_search_verify"], iw=iw, ih=ih)
+                has_search_like = bool(
+                    _find_best_box(boxes, target="搜索", roi_px=roi_top, min_conf=detect_min_confidence)
+                    or _find_best_box(boxes, target="搜", roi_px=roi_top, min_conf=detect_min_confidence)
+                    or _find_best_box(boxes, target="索", roi_px=roi_top, min_conf=detect_min_confidence)
+                )
+
+                if focus_is_text and has_search_like:
+                    prev = dict(state)
+                    state["mode"] = "search_view"
+                    state["searchViewByFocus"] = True
+                    debug_info.setdefault("stateOverrides", []).append(
+                        {"step": int(step), "from": prev, "to": dict(state), "focused": focus_info}
+                    )
+
             debug_info.setdefault("flow", []).append({"step": step, "state": state})
             _dump_debug_info(f"state_{step}")
 
@@ -3469,6 +3878,13 @@ class MusicController:
                 break
 
             if state.get("mode") == "music_main_ready":
+                # 按需求：若尚未进入搜索子界面，则先强制回到“推荐”子页（双击“推荐”）。
+                if not did_force_recommend:
+                    await _force_recommend_tab(cap_in=cap, step_idx=int(step))
+                    did_force_recommend = True
+                    await asyncio.sleep(0.25)
+                    continue
+
                 # 进入搜索页。
                 # - 优先在 search_bar ROI 内做 OCR（对低对比度的 placeholder "搜索"效果更好）。
                 # - 点击时往右偏一点，落在输入区域内（避免点到图标前缀）。
@@ -3515,15 +3931,51 @@ class MusicController:
                         accurate=False,
                         custom_words=["搜索", "取消", "历史", "历史搜索"],
                     )
-                    ok = (
-                        _has_text(boxes2, "取消")
-                        or _has_text(boxes2, "历史搜索")
-                        or (_has_text(boxes2, "历史") and _has_text(boxes2, "搜索"))
+                    has_cancel = _has_text(boxes2, "取消")
+
+                    # A1（按你的补充）：topROI 内只要出现“搜索 / 搜 / 索”任一即可。
+                    has_search_like = (
+                        _has_text(boxes2, "搜索")
+                        or _has_text(boxes2, "搜")
+                        or _has_text(boxes2, "索")
                     )
+
+                    # “历史搜索”在 OCR 下可能被误识别成“5史搜索”等变体：
+                    # - 优先匹配完整词
+                    # - 其次允许“历史 +（搜索/搜/索）”的拆词
+                    has_history_like = bool(
+                        _has_text(boxes2, "历史搜索")
+                        or (
+                            _has_text(boxes2, "历史")
+                            and (
+                                _has_text(boxes2, "搜索")
+                                or _has_text(boxes2, "搜")
+                                or _has_text(boxes2, "索")
+                            )
+                        )
+                    )
+
+                    focus_info: Optional[Dict[str, Any]] = None
+                    focus_is_text = False
+                    if not (has_cancel or has_history_like or has_search_like):
+                        # 方案2：OCR 不稳时，使用“焦点元素角色”兜底判定是否已进入搜索输入态。
+                        try:
+                            focus_info = await self.ui.get_focused_ui_element_info("酷狗音乐")
+                        except Exception:
+                            focus_info = None
+
+                        role = str((focus_info or {}).get("role") or "")
+                        focus_is_text = bool((focus_info or {}).get("ok") is True and ("Text" in role or "Field" in role))
+
+                    ok = bool(has_cancel or has_history_like or has_search_like or focus_is_text)
                     debug_info.setdefault("searchEntryVerify", []).append(
                         {
                             "tag": tag,
                             "ok": bool(ok),
+                            "hasCancel": bool(has_cancel),
+                            "hasHistory": bool(has_history_like),
+                            "hasSearchLike": bool(has_search_like),
+                            "focused": focus_info,
                             "preview": [str(getattr(b, "text", "") or "") for b in boxes2[:10]],
                         }
                     )
@@ -3904,14 +4356,51 @@ class MusicController:
         # 在结果列表区域做 OCR；用专门的 ROI（不修改全局 KUGOU_ROIS）。
         # 原因：全局的 result_list_top 是给其他步骤调的，可能会裁掉标题左侧。
         song_list_roi = (0.06, 0.20, 0.90, 0.50)
-        list_boxes = await self.ui.ocr_screenshot_advanced(
-            path,
-            roi=song_list_roi,
-            scale=2.4,
-            grayscale=True,
-            accurate=False,
-            custom_words=[song_key, "VIP", "MV", "播放", "暂停"],
-        )
+
+        def _song_list_is_loading(boxes_any: List[Any]) -> bool:
+            for b in boxes_any:
+                t = _norm(str(getattr(b, "text", "") or ""))
+                if ("加载中" in t) or ("请稍候" in t) or ("稍候" in t):
+                    return True
+            return False
+
+        # 方案1：单曲列表 OCR 前增加“加载态等待”。
+        # 说明：点击“单曲”后 UI 可能短暂出现“加载中，请稍候”，如果立刻 OCR 会被误判为无结果。
+        list_boxes: List[Any] = []
+        for attempt in range(12):
+            tag = f"kugou_song_list_wait_{attempt}"
+            if attempt == 11:
+                tag = "kugou_song_list"
+
+            cap = await self.ui.screenshot_window(owner_names=KUGOU_APP_NAMES, tag=tag)
+            debug_info.setdefault("captures", []).append({"step": tag, "capture": cap})
+
+            path = str(cap.get("screenshotPath") or "")
+            if not path:
+                raise RuntimeError("无法获取截图路径，无法在结果列表中定位歌曲")
+
+            list_boxes = await self.ui.ocr_screenshot_advanced(
+                path,
+                roi=song_list_roi,
+                scale=2.4,
+                grayscale=True,
+                accurate=False,
+                custom_words=[song_key, "VIP", "MV", "播放", "暂停", "加载中", "请稍候", "稍候"],
+            )
+
+            loading = _song_list_is_loading(list_boxes)
+            debug_info.setdefault("songListWait", []).append(
+                {
+                    "attempt": int(attempt),
+                    "tag": tag,
+                    "loading": bool(loading),
+                    "preview": [str(getattr(b, "text", "") or "") for b in list_boxes[:12]],
+                }
+            )
+            if not loading:
+                break
+
+            await asyncio.sleep(0.25)
 
         best = None
         best_key = None

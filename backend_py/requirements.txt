@@ -9,9 +9,11 @@ python-dotenv==1.0.1
 httpx==0.28.1
 aiohttp==3.11.11
 websockets==14.1
+cryptography==42.0.8
 
 # macOS UI automation (Vision OCR + Quartz input)
 pyobjc-core==12.1
 pyobjc-framework-Cocoa==12.1
 pyobjc-framework-Quartz==12.1
 pyobjc-framework-Vision==12.1
+pyobjc-framework-CoreLocation

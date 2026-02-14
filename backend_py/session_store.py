@@ -20,6 +20,9 @@ class Session:
     # 运行时标志位
     tts_settings: Dict[str, Any] = field(default_factory=dict)
     allow_local_control: Optional[bool] = None
+    network_access_enabled: bool = False
+    device_location_enabled: bool = False
+    device_location: Optional[Dict[str, Any]] = None
     tts_stopped: bool = False
     current_request_id: Optional[str] = None
 
