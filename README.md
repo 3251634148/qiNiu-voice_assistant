@@ -70,6 +70,10 @@ BAIDU_TTS_SECRET_KEY=your_baidu_tts_secret_key
 # 调试产物 runId（可选）：用于把 ui_debug 产物落盘到固定目录
 VOICE_ASSISTANT_DEBUG_RUN=debug_run_$(date +%s)
 
+# 设备定位（macOS CoreLocation）：需前端开启“设备定位”开关，并在系统弹窗中授予定位权限
+# - 后端会在需要时实时调用 CoreLocation 获取经纬度与街道/区/市信息
+# - 未开启设备定位时，定位/未指明城市的天气不会回退公网 IP
+
 # 联网信息工具（可选）：需前端开启“联网查询”开关后生效
 SERPAPI_API_KEY=your_serpapi_api_key_here
 NEWSDATA_API_KEY=your_newsdata_api_key_here

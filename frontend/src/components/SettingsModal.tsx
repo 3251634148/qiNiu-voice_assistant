@@ -139,60 +139,28 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     updateNetworkSettings(enabled);
   };
 
-  const applyDeviceLocation = (
-    enabled: boolean,
-    granted: boolean,
-    lonLat: string = "",
-    tsMs: number = 0
-  ) => {
+  const applyDeviceLocation = (enabled: boolean, granted: boolean) => {
     const next = {
       ...settings,
       deviceLocationEnabled: enabled,
       deviceLocationGranted: granted,
-      deviceLocationLonLat: lonLat,
-      deviceLocationTsMs: tsMs,
+      // 设备坐标由后端 macOS CoreLocation 实时获取；前端不再采集/缓存经纬度。
+      deviceLocationLonLat: "",
+      deviceLocationTsMs: 0,
     } as AppSettings;
     setSettings(next);
 
     persistSettings(next);
 
+    // 仅同步授权开关到后端会话态。
     updateDeviceLocation({
       deviceLocationEnabled: enabled,
-      lonLat,
-      tsMs,
     });
-  };
-
-  const requestDeviceLocation = () => {
-    if (!("geolocation" in navigator)) {
-      console.log("当前环境不支持 geolocation");
-      applyDeviceLocation(false, settings.deviceLocationGranted, "", 0);
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const lon = pos.coords.longitude;
-        const lat = pos.coords.latitude;
-        const tsMs = Date.now();
-        const lonLat = `${lon},${lat}`;
-        applyDeviceLocation(true, true, lonLat, tsMs);
-      },
-      (err) => {
-        console.log("获取设备定位失败:", err?.message);
-        applyDeviceLocation(false, settings.deviceLocationGranted, "", 0);
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 8000,
-        maximumAge: 60 * 1000,
-      }
-    );
   };
 
   const handleToggleDeviceLocation = () => {
     if (settings.deviceLocationEnabled) {
-      applyDeviceLocation(false, settings.deviceLocationGranted, "", 0);
+      applyDeviceLocation(false, settings.deviceLocationGranted);
       return;
     }
 
@@ -202,9 +170,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setDeviceLocationConfirm({
         id: `confirm_device_location_${now.getTime()}`,
         riskLevel: "medium",
-        reason: "开启设备定位后，助手会向系统请求你的位置信息，用于更准确地查询当前位置天气。",
-        summary: "允许助手使用设备定位（更准确的天气定位）",
-        suggestions: ["仅用于天气定位，不会读取本地文件", "你可以随时在设置中关闭该开关"],
+        reason: "开启设备定位后，助手会向系统请求你的位置信息，用于更准确地查询当前位置与天气。",
+        summary: "允许助手使用设备定位（macOS CoreLocation）",
+        suggestions: ["仅用于定位/天气，不会读取本地文件", "你可以随时在设置中关闭该开关"],
         timestamp: now.toISOString(),
         expiresAt: new Date(now.getTime() + 5 * 60 * 1000).toISOString(),
         toolCall: {
@@ -216,7 +184,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       return;
     }
 
-    requestDeviceLocation();
+    // 后端会在需要时通过 CoreLocation 实时获取坐标。
+    applyDeviceLocation(true, true);
   };
 
   const handleToggleNetworkAccess = () => {
@@ -259,11 +228,9 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     // 即使用户只点了“保存设置”，也同步一次联网开关（避免刷新后后端状态不一致）
     updateNetworkSettings(!!settings.networkAccessEnabled);
 
-    // 同步设备定位（若已启用且已有坐标）
+    // 同步设备定位授权开关（坐标由后端实时获取）
     updateDeviceLocation({
       deviceLocationEnabled: !!settings.deviceLocationEnabled,
-      lonLat: settings.deviceLocationLonLat,
-      tsMs: settings.deviceLocationTsMs,
     });
 
     updateTTSSettings({
@@ -491,11 +458,8 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <div>
                 <label className="text-sm font-medium text-gray-700">允许使用设备定位（更准确的天气定位）</label>
                 <p className="text-xs text-gray-500 mt-1">
-                  开启后会请求系统定位权限，用于提升“当前位置天气”准确度（可随时关闭）
+                  开启后助手会在需要时通过 macOS CoreLocation 获取你的实时位置，用于提升“当前位置/天气”准确度（可随时关闭）
                 </p>
-                {settings.deviceLocationEnabled && settings.deviceLocationLonLat ? (
-                  <p className="text-xs text-gray-500 mt-1">最近定位：{settings.deviceLocationLonLat}</p>
-                ) : null}
               </div>
               <button
                 onClick={handleToggleDeviceLocation}
@@ -561,7 +525,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           confirmation={deviceLocationConfirm}
           onConfirm={(approved) => {
             if (approved) {
-              requestDeviceLocation();
+              applyDeviceLocation(true, true);
             }
             setDeviceLocationConfirm(null);
           }}

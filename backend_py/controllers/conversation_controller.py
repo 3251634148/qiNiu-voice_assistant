@@ -12,6 +12,7 @@ import socketio
 
 from backend_py.safety import RiskAssessment, SafetyService
 from backend_py.services.asr_service import ASRService
+from backend_py.services.device_location_service import DeviceLocationService
 from backend_py.services.llm_service import LLMService
 from backend_py.services.network_tools_service import NetworkToolsService
 from backend_py.services.system_controller import SystemController
@@ -31,6 +32,7 @@ class ConversationController:
         self.system_controller = SystemController()
         self.llm_service = LLMService()
         self.network_tools_service = NetworkToolsService()
+        self.device_location_service = DeviceLocationService()
         self.tts_service = TTSService()
         self.asr_service = ASRService()
         self.tool_router = ToolRouter(llm_service=self.llm_service)
@@ -231,8 +233,11 @@ class ConversationController:
             except Exception:
                 ts_ms = 0
 
+            # 仅作为“授权开关”同步：当 lonLat 未提供时，不报错。
+            # 实际定位将由后端在 get_device_location 工具调用时实时获取。
             if not lon_lat:
-                return {"success": False, "error": "lonLat 不能为空"}
+                session.device_location = None
+                return {"success": True, "deviceLocationEnabled": True}
 
             if ts_ms <= 0:
                 ts_ms = int(time.time() * 1000)
@@ -717,7 +722,7 @@ class ConversationController:
         if not names or any(n is None for n in names):
             return llm_resp
 
-        if not all(self.network_tools_service.is_network_tool(n) for n in names if n):
+        if not all((self.network_tools_service.is_network_tool(n) or n == "get_device_location") for n in names if n):
             return llm_resp
 
         loop_messages: List[Dict[str, Any]] = list(messages)
@@ -737,7 +742,7 @@ class ConversationController:
             names = [self._tool_name_from_call(tc) for tc in tool_calls]
             if not names or any(n is None for n in names):
                 return current
-            if not all(self.network_tools_service.is_network_tool(n) for n in names if n):
+            if not all((self.network_tools_service.is_network_tool(n) or n == "get_device_location") for n in names if n):
                 return current
 
             # 记录本轮 tool_calls（含解析后的参数），用于定位“location=auto”等问题。
@@ -776,9 +781,12 @@ class ConversationController:
                 }
             )
 
-            async def _exec_one(tc: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
+            async def _exec_device_location(tc: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
+                nonlocal device_lon_lat
+
                 tool_call_id = str(tc.get("id") or "")
-                tool_name = self._tool_name_from_call(tc) or ""
+                tool_name = "get_device_location"
+
                 args_raw = (tc.get("function") or {}).get("arguments") if isinstance(tc.get("function"), dict) else None
                 args_obj: Dict[str, Any] = {}
                 if isinstance(args_raw, str) and args_raw.strip():
@@ -787,15 +795,256 @@ class ConversationController:
                     except Exception:
                         args_obj = {}
 
-                # 修复：模型经常传 location="auto"，若直接走 Geo lookup 会误匹配到无关城市。
-                # 当本会话已启用设备定位时，强制把 auto/current/here 等占位符改写为 device lon_lat。
+                timeout_sec = args_obj.get("timeoutSec")
+                try:
+                    timeout_sec_i = int(timeout_sec) if timeout_sec is not None else self.device_location_service.DEFAULT_TIMEOUT_SEC
+                except Exception:
+                    timeout_sec_i = self.device_location_service.DEFAULT_TIMEOUT_SEC
+                timeout_sec_i = max(3, min(30, timeout_sec_i))
+
+                self.network_tools_service.dump_debug_artifact(
+                    request_id=request_id,
+                    tag="local_tool_request_get_device_location",
+                    payload={
+                        "requestId": request_id,
+                        "round": round_idx,
+                        "toolCallId": tool_call_id,
+                        "timeoutSec": timeout_sec_i,
+                        "enabled": bool(getattr(session, "device_location_enabled", False)),
+                        "available": bool(self.device_location_service.is_available()),
+                    },
+                )
+
+                if not bool(getattr(session, "device_location_enabled", False)):
+                    err = "未开启设备定位，请在设置中开启‘设备定位’并授予系统定位权限。"
+                    self.network_tools_service.dump_debug_artifact(
+                        request_id=request_id,
+                        tag="local_tool_error_get_device_location",
+                        payload={
+                            "requestId": request_id,
+                            "round": round_idx,
+                            "toolCallId": tool_call_id,
+                            "error": err,
+                        },
+                    )
+                    return (
+                        tool_call_id,
+                        json.dumps({"error": err}, ensure_ascii=False),
+                        {"ok": False, "tool": tool_name, "args": {"timeoutSec": timeout_sec_i}, "error": err},
+                    )
+
+                # 关键：CoreLocation 的授权弹窗/回调依赖主线程 RunLoop。
+                # 因此这里不能丢到线程池执行，否则可能导致授权状态不刷新并最终超时。
+                started_ms = int(time.time() * 1000)
+
+                try:
+                    r = self.device_location_service.get_current_location(timeout_sec=timeout_sec_i)
+                except Exception as e:
+                    err = f"调用 CoreLocation 失败：{e}"
+                    self.network_tools_service.dump_debug_artifact(
+                        request_id=request_id,
+                        tag="local_tool_error_get_device_location",
+                        payload={
+                            "requestId": request_id,
+                            "round": round_idx,
+                            "toolCallId": tool_call_id,
+                            "error": err,
+                        },
+                    )
+                    return (
+                        tool_call_id,
+                        json.dumps({"error": err}, ensure_ascii=False),
+                        {"ok": False, "tool": tool_name, "args": {"timeoutSec": timeout_sec_i}, "error": err},
+                    )
+
+                finished_ms = int(time.time() * 1000)
+
+                if not getattr(r, "ok", False):
+                    err = str(getattr(r, "error", "获取设备定位失败"))
+                    self.network_tools_service.dump_debug_artifact(
+                        request_id=request_id,
+                        tag="local_tool_error_get_device_location",
+                        payload={
+                            "requestId": request_id,
+                            "round": round_idx,
+                            "toolCallId": tool_call_id,
+                            "error": err,
+                            "elapsedMs": finished_ms - started_ms,
+                        },
+                    )
+                    return (
+                        tool_call_id,
+                        json.dumps({"error": err}, ensure_ascii=False),
+                        {"ok": False, "tool": tool_name, "args": {"timeoutSec": timeout_sec_i}, "error": err},
+                    )
+
+                result_obj = getattr(r, "result", None) if r is not None else None
+                if not isinstance(result_obj, dict) or not result_obj.get("lon_lat"):
+                    err = "设备定位返回数据无效"
+                    self.network_tools_service.dump_debug_artifact(
+                        request_id=request_id,
+                        tag="local_tool_error_get_device_location",
+                        payload={
+                            "requestId": request_id,
+                            "round": round_idx,
+                            "toolCallId": tool_call_id,
+                            "error": err,
+                            "result": result_obj,
+                        },
+                    )
+                    return (
+                        tool_call_id,
+                        json.dumps({"error": err}, ensure_ascii=False),
+                        {"ok": False, "tool": tool_name, "args": {"timeoutSec": timeout_sec_i}, "error": err},
+                    )
+
+                device_lon_lat = str(result_obj.get("lon_lat") or "").strip() or device_lon_lat
+
+                # 基于经纬度反查城市信息（QWeather Geo lookup）。
+                geo_error = None
+                try:
+                    lon_lat_parts = [p.strip() for p in str(device_lon_lat or "").split(",")]
+                    if len(lon_lat_parts) == 2:
+                        lon_f = float(lon_lat_parts[0])
+                        lat_f = float(lon_lat_parts[1])
+                        lon_lat_2dp = f"{lon_f:.2f},{lat_f:.2f}"
+
+                        self.network_tools_service.dump_debug_artifact(
+                            request_id=request_id,
+                            tag="device_location_geo_lookup_request",
+                            payload={
+                                "requestId": request_id,
+                                "round": round_idx,
+                                "toolCallId": tool_call_id,
+                                "lonLatRaw": device_lon_lat,
+                                "lonLat2dp": lon_lat_2dp,
+                                "range": "cn",
+                                "lang": "zh",
+                                "number": 10,
+                            },
+                        )
+
+                        geo = await self.network_tools_service.qweather_city_lookup(
+                            location=lon_lat_2dp,
+                            range_="cn",
+                            lang="zh",
+                            number=10,
+                        )
+
+                        chosen = None
+                        if isinstance(geo, dict) and str(geo.get("code") or "") == "200":
+                            locs = geo.get("location")
+                            if isinstance(locs, list) and locs:
+                                chosen = locs[0] if isinstance(locs[0], dict) else None
+
+                        self.network_tools_service.dump_debug_artifact(
+                            request_id=request_id,
+                            tag="device_location_geo_lookup_response",
+                            payload={
+                                "requestId": request_id,
+                                "round": round_idx,
+                                "toolCallId": tool_call_id,
+                                "code": (geo or {}).get("code") if isinstance(geo, dict) else None,
+                                "locationCount": len((geo or {}).get("location") or [])
+                                if isinstance((geo or {}).get("location"), list)
+                                else None,
+                                "chosen": chosen,
+                            },
+                        )
+
+                        if isinstance(chosen, dict):
+                            addr = result_obj.get("address") if isinstance(result_obj.get("address"), dict) else {}
+
+                            # 对齐 CLPlacemark 的常见字段名，便于统一展示。
+                            adm2 = str(chosen.get("adm2") or "").strip() or None
+                            adm1 = str(chosen.get("adm1") or "").strip() or None
+                            country = str(chosen.get("country") or "").strip() or None
+
+                            if not addr.get("locality"):
+                                addr["locality"] = adm2 or str(chosen.get("name") or "").strip() or None
+                            if not addr.get("administrativeArea"):
+                                addr["administrativeArea"] = adm1
+                            if not addr.get("country"):
+                                addr["country"] = country
+
+                            addr["qweatherName"] = str(chosen.get("name") or "").strip() or None
+                            addr["qweatherId"] = str(chosen.get("id") or "").strip() or None
+                            addr["qweatherAdm2"] = adm2
+                            addr["qweatherAdm1"] = adm1
+                            addr["qweatherCountry"] = country
+
+                            result_obj["address"] = addr
+                    else:
+                        geo_error = "invalid_lon_lat"
+                except Exception as e:
+                    geo_error = f"geo_lookup_failed: {e}"
+
+                if geo_error:
+                    result_obj["geoLookupError"] = geo_error
+                    try:
+                        self.network_tools_service.dump_debug_artifact(
+                            request_id=request_id,
+                            tag="device_location_geo_lookup_error",
+                            payload={
+                                "requestId": request_id,
+                                "round": round_idx,
+                                "toolCallId": tool_call_id,
+                                "error": geo_error,
+                            },
+                        )
+                    except Exception:
+                        pass
+
+                # 将最新定位写回会话（供后续调试/兜底使用）。
+                session.device_location = {
+                    "lonLat": device_lon_lat,
+                    "tsMs": int(result_obj.get("timestamp_ms") or finished_ms),
+                    "accuracyM": result_obj.get("accuracy_m"),
+                    "address": result_obj.get("address"),
+                }
+
+                self.network_tools_service.dump_debug_artifact(
+                    request_id=request_id,
+                    tag="local_tool_response_get_device_location",
+                    payload={
+                        "requestId": request_id,
+                        "round": round_idx,
+                        "toolCallId": tool_call_id,
+                        "ok": True,
+                        "elapsedMs": finished_ms - started_ms,
+                        "result": result_obj,
+                    },
+                )
+
+                return (tool_call_id, json.dumps(result_obj, ensure_ascii=False), {"ok": True, "tool": tool_name, "args": {"timeoutSec": timeout_sec_i}})
+
+            async def _exec_network(tc: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
+                tool_call_id = str(tc.get("id") or "")
+                tool_name = self._tool_name_from_call(tc) or ""
+
+                args_raw = (tc.get("function") or {}).get("arguments") if isinstance(tc.get("function"), dict) else None
+                args_obj: Dict[str, Any] = {}
+                if isinstance(args_raw, str) and args_raw.strip():
+                    try:
+                        args_obj = json.loads(args_raw)
+                    except Exception:
+                        args_obj = {}
+
+                # 约束：当前位置/未指明城市天气不要使用公网 IP 定位。
+                if tool_name == "get_ip_location":
+                    raise RuntimeError("禁止使用公网 IP 定位获取当前位置，请改用 get_device_location")
+
+                # 若存在 device lon_lat，则把 location=auto/current/here 等占位符改写为真实坐标。
                 override_reason = None
-                if tool_name in {"get_weather_now", "get_weather_12h"} and device_lon_lat:
+                if tool_name in {"get_weather_now", "get_weather_12h"}:
                     raw_loc = args_obj.get("location")
                     raw_loc_s = str(raw_loc or "").strip().lower()
                     if raw_loc_s in {"", "auto", "current", "here", "local"}:
-                        args_obj["location"] = device_lon_lat
-                        override_reason = f"override_location_{raw_loc_s or 'empty'}_to_device_lon_lat"
+                        if device_lon_lat:
+                            args_obj["location"] = device_lon_lat
+                            override_reason = f"override_location_{raw_loc_s or 'empty'}_to_device_lon_lat"
+                        else:
+                            raise RuntimeError("未获取到设备定位，请开启‘设备定位’后重试")
 
                 if override_reason:
                     self.network_tools_service.dump_debug_artifact(
@@ -856,8 +1105,26 @@ class ConversationController:
                         {"ok": False, "tool": tool_name, "args": args_obj, "error": str(e)},
                     )
 
-            # 并行执行本轮所有网络工具
-            results = await asyncio.gather(*[_exec_one(tc) for tc in tool_calls])
+            # 先执行设备定位（若模型要求，或天气工具使用了占位符 location）。
+            device_calls = [tc for tc in tool_calls if (self._tool_name_from_call(tc) or "") == "get_device_location"]
+            needs_device_for_weather = any(
+                (self._tool_name_from_call(tc) or "") in {"get_weather_now", "get_weather_12h"}
+                and str(((tc.get("function") or {}).get("arguments") if isinstance(tc.get("function"), dict) else "") or "").lower().find("auto") >= 0
+                for tc in tool_calls
+            )
+
+            results: List[Tuple[str, str, Dict[str, Any]]] = []
+            if device_calls:
+                results.append(await _exec_device_location(device_calls[0]))
+            elif needs_device_for_weather and bool(getattr(session, "device_location_enabled", False)):
+                # 模型没显式调用 get_device_location，但用了 location=auto：执行层自动补齐一次设备定位。
+                auto_tc = {"id": f"auto_device_loc_{int(time.time() * 1000)}", "function": {"arguments": "{}"}}
+                results.append(await _exec_device_location(auto_tc))
+
+            # 并行执行剩余联网工具（排除 get_device_location）。
+            other_calls = [tc for tc in tool_calls if (self._tool_name_from_call(tc) or "") != "get_device_location"]
+            if other_calls:
+                results.extend(await asyncio.gather(*[_exec_network(tc) for tc in other_calls]))
 
             ip_city = None
             ip_region = None
@@ -898,8 +1165,19 @@ class ConversationController:
                         # 无法解析则视为失败
                         weather_ok = False
 
-            # 兜底策略：任何一步失败（或天气 code!=200）都不追问用户，直接 web_search 并让模型总结。
-            if any_failed or (weather_ok is False):
+            # 兜底策略：
+            # - 天气接口失败或 code!=200：允许 web_search 兜底
+            # - 设备定位失败/未授权、或误用 IP 定位：不调用 web_search，让模型提示用户开启设备定位/修正工具选择
+            has_device_location_failure = any(
+                (str(m.get("tool") or "") == "get_device_location") and (not bool(m.get("ok")))
+                for _tid, _content, m in results
+            )
+            has_ip_location_policy_failure = any(
+                (str(m.get("tool") or "") == "get_ip_location") and (not bool(m.get("ok")))
+                for _tid, _content, m in results
+            )
+
+            if (any_failed or (weather_ok is False)) and (not has_device_location_failure) and (not has_ip_location_policy_failure):
                 place = ""
                 if last_weather_query and (not last_weather_query.isdigit()) and "," not in last_weather_query:
                     place = last_weather_query
@@ -992,69 +1270,28 @@ class ConversationController:
             if m.get("type") in {"user", "assistant"}
         ]
 
-        # 若用户已授权“设备定位”，则把坐标作为系统上下文提供给模型。
-        # 目的：避免仅靠公网 IP 定位导致城市级偏差（例如深圳误判为广州）。
-        device_loc = getattr(session, "device_location", None)
-        if bool(getattr(session, "device_location_enabled", False)) and isinstance(device_loc, dict):
-            lon_lat = str(device_loc.get("lonLat") or "").strip()
-            ts_ms = device_loc.get("tsMs")
-            try:
-                ts_ms_i = int(ts_ms) if ts_ms is not None else None
-            except Exception:
-                ts_ms_i = None
+        include_network = bool(session.network_access_enabled)
+        include_device_location = bool(getattr(session, "device_location_enabled", False)) and self.device_location_service.is_available()
 
-            # 位置过旧就不作为强信号（例如用户移动了位置）。默认 24 小时有效。
-            now_ms = int(time.time() * 1000)
-            age_ms = None
-
-            is_fresh = False
-            if ts_ms_i is not None:
-                age_ms = max(0, now_ms - ts_ms_i)
-                is_fresh = age_ms <= (24 * 60 * 60 * 1000)
-
-            should_prefer = bool(lon_lat) and bool(is_fresh) and self._should_prefer_device_location(user_text)
-
+        # 记录本次“设备定位工具是否可用/是否已授权开启”，便于排障。
+        try:
             self.network_tools_service.dump_debug_artifact(
                 request_id=effective_request_id,
-                tag="device_location_decision",
+                tag="device_location_capability",
                 payload={
                     "requestId": effective_request_id,
-                    "userText": user_text,
-                    "device": {
-                        "enabled": bool(getattr(session, "device_location_enabled", False)),
-                        "lonLat": lon_lat or None,
-                        "tsMs": ts_ms_i,
-                        "ageMs": age_ms,
-                        "isFresh": bool(is_fresh),
-                    },
-                    "decision": {
-                        "shouldPrefer": bool(should_prefer),
-                        "isWeatherRequest": bool(self._is_weather_request(user_text)),
-                        "isLocationRequest": bool(self._is_location_request(user_text)),
-                        "hasExplicitLocationHint": bool(self._contains_explicit_location_hint(user_text)),
-                    },
+                    "deviceLocationEnabled": bool(getattr(session, "device_location_enabled", False)),
+                    "deviceLocationToolAvailable": bool(self.device_location_service.is_available()),
+                    "effectiveIncludeDeviceLocation": bool(include_device_location),
                 },
             )
+        except Exception:
+            pass
 
-            if should_prefer:
-                # 放在最前面的 system，尽量提高“必须使用设备坐标”的约束强度。
-                messages = [
-                    {
-                        "role": "system",
-                        "content": (
-                            "系统定位信息（用户已授权设备定位）："
-                            f"lon_lat={lon_lat}。"
-                            "当用户问天气或定位且未指定具体地点时（例如‘今天天气怎么样？’、‘天气预报’、‘我现在在哪？’），"
-                            "一律视为问当前位置：必须优先用该 lon_lat。"
-                            "若查询天气，使用 get_weather_now + get_weather_12h；"
-                            "若用户问定位，直接根据 lon_lat 回答经纬度，不要调用 get_ip_location 也不要猜城市名。"
-                        ),
-                    },
-                    *messages,
-                ]
-
-        include_network = bool(session.network_access_enabled)
-        tool_defs = self.llm_service.build_tool_definitions(include_network=include_network)
+        tool_defs = self.llm_service.build_tool_definitions(
+            include_network=include_network,
+            include_device_location=include_device_location,
+        )
 
         llm_resp = await self.llm_service.invoke_llm(
             messages,
@@ -1062,15 +1299,18 @@ class ConversationController:
             parallel_tool_calls=include_network,
         )
 
-        # 兼容：模型可能把“联网工具调用意图”写在 INTENT_JSON.actions 中，而不是 tool_calls。
-        # 对于联网工具，我们必须走 tool-loop 回填，再让模型总结输出，避免被 SafetyService 当作“未知工具”拦截。
-        if include_network and not (llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []):
+        # 兼容：模型可能把“工具调用意图”写在 INTENT_JSON.actions 中，而不是 tool_calls。
+        # 对于 get_device_location 与联网工具，我们必须走 tool-loop 回填，再让模型总结输出，避免被 SafetyService 当作“未知工具”拦截。
+        if (include_network or include_device_location) and not (
+            llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
+        ):
             parsed_first = self.parse_assistant_text(llm_resp.get("text"))
             intent_first = self.merge_intent_with_tool_calls(parsed_first.get("intent"), [])
             synthesized = self.build_tool_calls_from_intent(intent_first)
+            synthesized_names = [self._tool_name_from_call(tc) or "" for tc in synthesized]
             if synthesized and all(
-                self.network_tools_service.is_network_tool(self._tool_name_from_call(tc) or "")
-                for tc in synthesized
+                self.network_tools_service.is_network_tool(name) or name == "get_device_location"
+                for name in synthesized_names
             ):
                 # 记录本轮“从 INTENT_JSON.actions 合成”的 tool_calls（否则后续 llm_resp 可能不带 toolCalls）。
                 try:
@@ -1100,7 +1340,7 @@ class ConversationController:
 
                 llm_resp = {**llm_resp, "toolCalls": synthesized, "text": ""}
 
-        if include_network:
+        if include_network or include_device_location:
             llm_resp = await self._maybe_run_network_tool_loop(
                 sid=sid,
                 request_id=effective_request_id,
@@ -1141,17 +1381,41 @@ class ConversationController:
         response_text = self._sanitize_say_text(parsed.get("sayText") or "")
 
         tool_calls_raw = llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
-        # 重要：联网工具的 tool_calls 只允许走“工具回填循环”，不能走 ToolRouter。
+        # 重要：联网工具与 get_device_location 必须走“工具回填循环”，不能走 ToolRouter。
         tool_calls = [
             tc
             for tc in tool_calls_raw
             if not self.network_tools_service.is_network_tool(self._tool_name_from_call(tc) or "")
+            and (self._tool_name_from_call(tc) or "") != "get_device_location"
         ]
 
         intent = self.merge_intent_with_tool_calls(parsed.get("intent"), tool_calls)
 
         tool_calls_from_intent = [] if tool_calls else self.build_tool_calls_from_intent(intent)
         selected_tool_calls = tool_calls or tool_calls_from_intent
+
+        # 若模型要求设备定位但当前未启用/不可用，则直接提示用户开启设备定位，避免走 Safety/ToolRouter。
+        if selected_tool_calls and any(
+            (self._tool_name_from_call(tc) or "") == "get_device_location" for tc in selected_tool_calls
+        ):
+            if not include_device_location:
+                response_text = "未开启设备定位，请在设置中开启‘设备定位’并授予系统定位权限。"
+                selected_tool_calls = []
+                intent = {"mode": "ask", "confidence": 0.9, "actions": [], "reason": "device_location_disabled"}
+
+                try:
+                    self.network_tools_service.dump_debug_artifact(
+                        request_id=effective_request_id,
+                        tag="device_location_blocked",
+                        payload={
+                            "requestId": effective_request_id,
+                            "deviceLocationEnabled": bool(getattr(session, "device_location_enabled", False)),
+                            "deviceLocationToolAvailable": bool(self.device_location_service.is_available()),
+                            "effectiveIncludeDeviceLocation": bool(include_device_location),
+                        },
+                    )
+                except Exception:
+                    pass
 
         fallback_applied = False
         fallback_reason = None

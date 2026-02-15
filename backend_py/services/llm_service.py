@@ -28,6 +28,18 @@ class LLMService:
         self.model_default = "qwen-plus"
         self.network_tools = NetworkToolsService()
 
+        # 本地设备定位工具（macOS CoreLocation），由会话开关决定是否对模型暴露。
+        self.device_location_tool_def = {
+            "name": "get_device_location",
+            "description": "获取本机设备的实时位置（macOS CoreLocation）。返回经纬度、精度（米）与街道/区/市等地址信息。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timeoutSec": {"type": "number", "description": "可选：超时时间（秒），默认 12"}
+                },
+            },
+        }
+
         self.system_prompt = (
             "你是一位友好、自然、口语化的电脑语音助手。你的目标是和用户进行顺畅的对话式交流，理解用户的意图并把它转换为具体可执行的电脑操作或直接给出有用的回复。\n\n"
             "输出格式（必须严格遵守）：\n"
@@ -67,17 +79,20 @@ class LLMService:
             "- 联网信息能力（若工具可用）：当你需要获取实时信息（当前时间、天气、最新新闻、刚发生的事件、互联网搜索结果）时，优先调用对应工具；不要编造\n"
             "  - web_search：互联网搜索，返回带来源链接的摘要\n"
             "  - get_latest_news：获取近期新闻列表（带来源链接）\n"
-            "  - get_ip_location：获取当前公网 IP 的城市/经纬度/时区（用于本地化天气；精度有限，可能存在城市级偏差）\n"
+            "  - get_device_location：获取本机设备的实时位置（macOS CoreLocation），精度更高。\n"
+            "  - get_ip_location：获取当前公网 IP 的城市/经纬度/时区（精度有限，不应用于当前位置/未指明城市的天气）\n"
             "  - get_weather_now：获取指定 location 的当前天气（location 可为城市/区县/LocationID/经纬度；必要时会先解析 LocationID）\n"
             "  - get_weather_12h：获取未来 12 小时天气预报（用于判断未来是否降雨、转凉等趋势，并给出温度区间）\n"
             "  - get_current_time：获取本地当前时间\n"
-            "  - 天气问题优先策略：\n"
-            "    1) 若系统已提供‘设备定位 lon_lat’（用户已授权）：直接用该 lon_lat 调用 get_weather_now + get_weather_12h，不要调用 get_ip_location\n"
-            "    2) 用户问‘我这里/当前位置/现在所在位置’且没有设备定位：先 get_ip_location，再用返回的 lon_lat 调用 get_weather_now + get_weather_12h\n"
-            "    3) 用户问指定城市：直接 get_weather_now(location=城市名) + get_weather_12h(location=城市名)。如遇重名可加 adm/range=cn\n"
+            "  - 天气/定位问题优先策略（必须遵守）：\n"
+            "    1) 用户问‘我在哪/当前位置/我现在所处位置’：必须调用 get_device_location 获取经纬度+地址信息，再总结回答；禁止调用 get_ip_location\n"
+            "    2) 用户问天气但未指明城市（例如‘今天天气怎么样？’）：必须先调用 get_device_location，然后用返回的 lon_lat 调用 get_weather_now + get_weather_12h；禁止调用 get_ip_location\n"
+            "    3) 用户明确问某个城市：直接 get_weather_now(location=城市名) + get_weather_12h(location=城市名)。如遇重名可加 adm/range=cn\n"
+            "    4) 若无法调用 get_device_location（工具不可用/未授权）：只允许提示用户到设置开启‘设备定位’并授予系统定位权限，不要回退到 IP 定位\n"
             "  - 天气回答必须包含：当前天气（温度/湿度/风/天气描述）+ 未来12小时温度区间（最低~最高）+ 未来趋势（例如傍晚可能下雨/转凉）+ 暖心建议（带伞/加衣等）\n"
-            "  - 失败强兜底（必须执行）：当任一联网工具返回 error，或 get_weather_now/get_weather_12h 返回 code!=200 时，必须立刻调用 web_search 用互联网结果直接回答；禁止再问用户是否要搜索；不要说接口不可用\n"
-            "- 仅可使用以下工具：play_music、music_ui、media_control、stop_music、open_app、write_article、write_file、write_run_code、file_control、run_tests、execute_workflow、web_search、get_latest_news、get_ip_location、get_weather_now、get_weather_12h、get_current_time\n"
+            "  - 失败强兜底（必须执行）：当【天气相关联网工具】返回 error，或 get_weather_now/get_weather_12h 返回 code!=200 时，必须立刻调用 web_search 用互联网结果直接回答；禁止再问用户是否要搜索；不要说接口不可用。\n"
+            "    - 例外：若 get_device_location 失败/未授权，只允许提示用户到设置开启‘设备定位’并授予系统定位权限，不要调用 web_search，也不要回退 IP。\n"
+            "- 仅可使用以下工具：play_music、music_ui、media_control、stop_music、open_app、write_article、write_file、write_run_code、file_control、run_tests、execute_workflow、web_search、get_latest_news、get_device_location、get_ip_location、get_weather_now、get_weather_12h、get_current_time\n"
             "- music_ui 用于通过 UI 自动化控制音乐播放器（例如酷狗/Apple Music 的搜索播放、我喜欢列表播放等）。这是高风险操作，通常需要用户确认\n"
             "- media_control 用于系统媒体键兜底（播放/暂停、上一首、下一首、音量、当前曲目信息等），通常不需要确认\n"
             "- send_message（企业微信/飞书/微信等 API）当前不启用，因为密钥信息难以获得\n"
@@ -356,10 +371,14 @@ class LLMService:
 
         return {"text": text, "toolCalls": tool_calls, "model": "stub", "usage": None}
 
-    def build_tool_definitions(self, *, include_network: bool) -> List[Dict[str, Any]]:
+    def build_tool_definitions(self, *, include_network: bool, include_device_location: bool) -> List[Dict[str, Any]]:
+        base = list(self.function_definitions)
+        if include_device_location:
+            base.append(self.device_location_tool_def)
+
         if include_network:
-            return [*self.function_definitions, *self.network_tools.get_tool_definitions()]
-        return list(self.function_definitions)
+            return [*base, *self.network_tools.get_tool_definitions()]
+        return base
 
     async def invoke_llm(
         self,

@@ -517,79 +517,10 @@ export function useSocket() {
       stopAllRef.current = false;
 
       const trimmed = String(text || "").trim();
-      const settings = getSettings();
       const requestId = generateRequestId();
       activeRequestIdRef.current = requestId;
 
-      const shouldRefreshLocation =
-        !!settings.deviceLocationEnabled
-        && /天气|气温|温度|预报|下雨|降雨|湿度|风|定位|位置|我在哪|我在哪里|在哪儿|在什么地方|当前位置/.test(trimmed);
-
-      const nowMs = Date.now();
-      const isCachedFresh =
-        !!settings.deviceLocationLonLat
-        && !!settings.deviceLocationTsMs
-        && nowMs - Number(settings.deviceLocationTsMs || 0) <= 30 * 60 * 1000;
-
-      // 先把“缓存中的最新坐标”同步到后端，避免新会话/sid 丢坐标。
-      if (shouldRefreshLocation && isCachedFresh) {
-        try {
-          socketRef.current.updateDeviceLocation({
-            deviceLocationEnabled: true,
-            lonLat: settings.deviceLocationLonLat,
-            tsMs: settings.deviceLocationTsMs,
-          });
-        } catch (error) {
-          console.log("同步缓存设备定位失败（忽略）:", (error as any)?.message);
-        }
-      }
-
-      if (shouldRefreshLocation && "geolocation" in navigator) {
-        try {
-          const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
-            navigator.geolocation.getCurrentPosition(resolve, reject, {
-              enableHighAccuracy: true,
-              timeout: 6000,
-              maximumAge: 0,
-            });
-          });
-
-          const lonLat = `${pos.coords.longitude},${pos.coords.latitude}`;
-          const tsMs = Date.now();
-
-          // 同步到后端会话态
-          socketRef.current.updateDeviceLocation({
-            deviceLocationEnabled: true,
-            lonLat,
-            tsMs,
-          });
-
-          // 同步到本地持久化（避免刷新/重连后丢失最近坐标）
-          try {
-            const nextSettings = {
-              ...settings,
-              deviceLocationLonLat: lonLat,
-              deviceLocationTsMs: tsMs,
-            };
-            localStorage.setItem("appSettings", JSON.stringify(nextSettings));
-          } catch (e) {
-            console.log("更新本地设备定位缓存失败（忽略）:", (e as any)?.message);
-          }
-        } catch (error) {
-          const message = String((error as any)?.message || "").trim();
-          console.log("刷新设备定位失败（忽略）:", message);
-
-          // 若用户本地开启了设备定位，但刷新失败且缓存也不新鲜，则提示可能回退公网IP定位。
-          if (shouldRefreshLocation && !isCachedFresh) {
-            addMessage(
-              "system",
-              "⚠️ 设备定位刷新失败，本次可能会回退到公网IP粗略定位（可能偏到广州等城市）。请检查系统定位权限或稍后重试。",
-              { requestId }
-            );
-          }
-        }
-      }
-
+      // 设备定位将由后端 macOS CoreLocation 工具实时获取；前端仅负责授权开关同步。
       addMessage("user", trimmed, { requestId });
       socketRef.current.sendTextCommand(trimmed, requestId);
     },

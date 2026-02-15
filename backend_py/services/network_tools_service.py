@@ -733,6 +733,30 @@ class NetworkToolsService:
                 tail = self._truncate_text(text, limit=800)
                 raise RuntimeError(f"QWeather 请求失败（HTTP {status}）：{tail}")
 
+    async def qweather_city_lookup(
+        self,
+        *,
+        location: str,
+        adm: Optional[str] = None,
+        range_: str = "cn",
+        number: int = 10,
+        lang: str = "zh",
+    ) -> Dict[str, Any]:
+        """QWeather Geo：城市查询（GET /geo/v2/city/lookup）。
+
+        说明：
+        - 该接口支持 `lon,lat` 或城市名模糊查询。
+        - 这里返回原始 JSON；上层可按 rank 选择第一条。
+        """
+
+        return await self._qweather_city_lookup(
+            location=location,
+            adm=adm,
+            range_=range_,
+            number=number,
+            lang=lang,
+        )
+
     async def _qweather_city_lookup(
         self,
         *,

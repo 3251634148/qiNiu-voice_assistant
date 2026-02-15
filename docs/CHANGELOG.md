@@ -1,3 +1,23 @@
+## 2026-02-14
+
+### 🔧 问题修复
+- 修复 `get_device_location` 在模型仅通过 `INTENT_JSON.actions` 表达（未返回 `tool_calls`）时，未进入 tool-loop 回填链路而被 `SafetyService` 误拦截为“未知工具类型”的问题。
+- 修复本地 CoreLocation 多次调用时，PyObjC 重复注册 delegate 类导致的异常：`_Delegate is overriding existing Objective-C class`。
+- 修复 CoreLocation 授权/回调在后台线程执行导致授权状态不刷新、最终超时的问题：设备定位改为主线程执行，并补充授权状态采样信息用于排障。
+- 新增 macOS 定位 Helper（Swift `.app` + `Info.plist`）：用于稳定触发系统定位授权弹窗与 TCC 记录，后端优先通过该 Helper 获取经纬度与地址信息。
+- 设备定位补齐城市信息：基于 `lon,lat` 调用 QWeather `/geo/v2/city/lookup`，将 `name/adm1/adm2/id` 写回定位结果的 `address`。
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/controllers/conversation_controller.py` | tool-loop 合成逻辑支持 `get_device_location`；补齐经纬度→城市 geo lookup，并落盘调试产物 |
+| `backend_py/services/device_location_service.py` | 优先通过 `open -W` 启动定位 Helper；delegate 模块级定义；输出结构兼容 |
+| `backend_py/services/network_tools_service.py` | 新增 `qweather_city_lookup()` 供定位链路复用 |
+| `backend_py/config.py` | 修复 `.env` 加载依赖 cwd 的问题（改为基于仓库根目录） |
+| `backend_py/macos_location_helper/` | 新增 Swift 定位 Helper（`.app` + `Info.plist`，支持 `--outPath`） |
+| `test_scripts/debug_device_location.py` | 连续两次定位；并用 QWeather Geo lookup 验证城市信息 |
+| `docs/CHANGELOG.md` | 记录本次变更 |
+
 ## 2026-02-13
 
 ### 🔧 问题修复
@@ -22,8 +42,8 @@
 ### ✨ 功能增强
 - 天气链路增强：新增预报工具 `get_weather_12h`（基于 QWeather `/v7/weather/24h`，截取前 12 小时），用于生成"未来 12 小时趋势 + 温度区间 + 暖心建议"。
 - QWeather 鉴权升级：支持 EdDSA(JWT, Ed25519) 方式生成 `Authorization: Bearer <jwt>`（通过 `QWEATHER_JWT_KID/QWEATHER_JWT_PRIVATE_KEY_PATH` 配置），不再依赖 `QWEATHER_API_KEY`。
-- 新增更准确的"设备定位"能力（需前端一次性授权）：前端获取 `lon,lat` 同步到后端会话态；当用户问天气/定位且未指定地点（例如"今天天气怎么样？"、"我现在在哪？"）时，后端会优先使用设备定位，避免公网 IP 城市级偏差。
-- 可观测性增强：对每次请求落盘 `device_location_decision`（含 ageMs/24h freshness）、`net_tool_calls_round_*`、`location_override` 调试产物，明确本次是否使用设备定位/是否将 `location=auto` 纠正为设备坐标。
+- 新增本地工具 `get_device_location`（macOS CoreLocation）：获取实时经纬度 + 精度（米）+ 街道/区/市地址信息；当用户问“我在哪/当前位置”或问天气但未指明城市时，模型必须优先调用该工具，禁止回退公网 IP 定位。
+- 可观测性增强：对每次请求落盘 `device_location_capability`、`local_tool_*_get_device_location`、`net_tool_calls_round_*`、`location_override` 调试产物，明确本次是否成功使用 CoreLocation 以及是否纠正了 `location=auto`。
 
 
 

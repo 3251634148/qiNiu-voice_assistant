@@ -5,9 +5,12 @@ from dotenv import load_dotenv
 
 
 # 与 Node 后端行为对齐：Node 会从 backend/.env 加载环境变量。
-# Python 侧同时尝试加载仓库根目录 `.env` 与 `backend/.env`（如果存在）。
-load_dotenv(dotenv_path=Path(".env"), override=False)
-load_dotenv(dotenv_path=Path("backend") / ".env", override=False)
+# 注意：不能依赖当前工作目录（cwd），否则在 `cd backend_py` 运行脚本时会加载失败。
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Python 侧优先加载仓库根目录 `.env` 与 `backend/.env`（如果存在）。
+load_dotenv(dotenv_path=REPO_ROOT / ".env", override=False)
+load_dotenv(dotenv_path=REPO_ROOT / "backend" / ".env", override=False)
 
 
 class Settings:
