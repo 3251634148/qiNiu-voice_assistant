@@ -201,8 +201,10 @@ def _hamming_distance_hex(a: str, b: str) -> int:
         return 10**9
 
 
+from backend_py.config_manager import UI_AUTOMATION_CONFIG
 from backend_py.services.macos_media_control import MacOSMediaControl
 from backend_py.services.macos_ui_automation import MacOSUIAutomation
+from backend_py.services.vlm_ui_driver import VlmUiDriver
 
 
 KUGOU_APP_NAMES = ["酷狗音乐", "KugouMusic", "Kugou Music"]
@@ -1325,7 +1327,14 @@ class MusicController:
             if not query:
                 raise RuntimeError("search 需要提供 query")
 
-            # 重构后的纯 OCR 工作流（导航环节不使用坐标/键盘兜底）。
+            mode = str(UI_AUTOMATION_CONFIG.mode or "ocr").strip().lower()
+            if mode == "vlm":
+                # 完全 VLM 模式：由本地 Ollama VLM 决策 click/type_text/noop 并驱动执行。
+                # 注意：该模式不回退 OCR（满足“两个完全不同模式”的约束）。
+                driver = VlmUiDriver(ui=self.ui)
+                return await driver.run_kugou_search_play(query=query, debug=debug, dry_run=dry_run)
+
+            # 默认：纯 OCR 工作流（导航环节不使用坐标/键盘兜底）。
             return await self._kugou_search_ocr_workflow(query=query, debug=debug, dry_run=dry_run)
 
             ocr_min_confidence = 0.75

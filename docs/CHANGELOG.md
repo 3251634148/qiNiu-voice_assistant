@@ -1,3 +1,26 @@
+## 2026-02-16
+
+### ✨ 功能增强
+- KuGou `music_ui(search)`：VLM 全控模式升级为 **单次推理 `UI_PLAN_JSON`**（包含 state + action + target + bbox_norm），并在本地做硬校验（state→target 约束、bbox 合法性、置信度门槛），必要时触发一次纠错重问。
+- VLM 输入图像策略调整为 **WebP only（quality=95）**：窗口截图（PNG）转换为 WebP 后喂给模型，不提供 PNG/JPEG 兜底；失败则 fail-fast 并落盘证据。
+- 新增 **KuGou VLM Playbook（持久化规则）**：将搜索播放全流程与遮挡分支固化为可注入的本地规则，减少模型“临时猜测”。
+
+### 🧪 测试
+- 新增 `test_scripts/test_ollama_chat_smoke.py`：验证本地 Ollama `/api/chat` 基础连通性。
+- 新增 `test_scripts/debug_kugou_vlm_driver_dry_run.py`：KuGou VLM driver dry-run（不点击不键入，仅落盘证据）。
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/services/vlm_ui_driver.py` | 改为 `UI_PLAN_JSON` 单次推理 + 硬校验纠错；输入图转 WebP(q=95) 后调用 Ollama |
+| `backend_py/resources/kugou_vlm_playbook_v1.json` | 新增 KuGou VLM Playbook（state→target 约束） |
+| `backend_py/services/music_controller.py` | `search` 动作按 `ocr/vlm` 配置分流 |
+| `test_scripts/test_ollama_chat_smoke.py` | 新增 Ollama smoke |
+| `test_scripts/debug_kugou_vlm_driver_dry_run.py` | 更新说明：VLM 输入为 WebP(q=95) |
+| `temp_md/2026-02-16_kugou_vlm_ui_driver_impl.md` | 更新：记录协议从 `UI_ACTION_JSON` 升级为 `UI_PLAN_JSON` |
+| `temp_md/kugou_vlm_playbook_v1.md` | 新增：KuGou VLM Playbook v1（规则文档） |
+| `docs/CHANGELOG.md` | 记录本次变更 |
+
 ## 2026-02-14
 
 ### 🔧 问题修复
