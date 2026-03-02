@@ -110,7 +110,6 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
-temp_md/
 *.tmp
 *.temp
 
