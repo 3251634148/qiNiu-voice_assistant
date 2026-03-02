@@ -92,8 +92,13 @@ class LLMService:
             "  - 天气回答必须包含：当前天气（温度/湿度/风/天气描述）+ 未来12小时温度区间（最低~最高）+ 未来趋势（例如傍晚可能下雨/转凉）+ 暖心建议（带伞/加衣等）\n"
             "  - 失败强兜底（必须执行）：当【天气相关联网工具】返回 error，或 get_weather_now/get_weather_12h 返回 code!=200 时，必须立刻调用 web_search 用互联网结果直接回答；禁止再问用户是否要搜索；不要说接口不可用。\n"
             "    - 例外：若 get_device_location 失败/未授权，只允许提示用户到设置开启‘设备定位’并授予系统定位权限，不要调用 web_search，也不要回退 IP。\n"
-            "- 仅可使用以下工具：play_music、music_ui、media_control、stop_music、open_app、write_article、write_file、write_run_code、file_control、run_tests、execute_workflow、web_search、get_latest_news、get_device_location、get_ip_location、get_weather_now、get_weather_12h、get_current_time\n"
+            "- 仅可使用以下工具：play_music、music_ui、douyin_ui、wecom_ui、media_control、stop_music、open_app、write_article、write_file、write_run_code、file_control、run_tests、execute_workflow、web_search、get_latest_news、get_device_location、get_ip_location、get_weather_now、get_weather_12h、get_current_time\n"
             "- music_ui 用于通过 UI 自动化控制音乐播放器（例如酷狗/Apple Music 的搜索播放、我喜欢列表播放等）。这是高风险操作，通常需要用户确认\n"
+            "- douyin_ui 用于通过 UI 自动化控制抖音：搜索并播放最匹配视频。高风险操作，通常需要用户确认\n"
+            "  - query 必须是干净的搜索词：去掉‘帮我/请/麻烦/在抖音/抖音里/给我/搜索/播放/找一下’等指令词，只保留要搜索的主题\n"
+            "- wecom_ui 用于通过 UI 自动化控制企业微信：搜索联系人并发送消息。高风险操作，通常需要用户确认\n"
+            "  - contactName 必须是联系人姓名或备注（不要带‘给/发消息给/@’等前缀）\n"
+            "  - message 必须是要发送的原始消息正文（不要加入多余解释）\n"
             "- media_control 用于系统媒体键兜底（播放/暂停、上一首、下一首、音量、当前曲目信息等），通常不需要确认\n"
             "- send_message（企业微信/飞书/微信等 API）当前不启用，因为密钥信息难以获得\n"
             "- run_tests 用于在指定工作目录运行单测命令（高风险，通常需要用户确认）\n"
@@ -147,6 +152,33 @@ class LLMService:
                         "dryRun": {"type": "boolean", "description": "只演练不点击（可选）"},
                     },
                     "required": ["player", "action"],
+                },
+            },
+            {
+                "name": "douyin_ui",
+                "description": "通过 UI 自动化控制抖音：搜索并播放最匹配视频（高风险，需要确认）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "搜索关键词（必须是干净的搜索词）"},
+                        "debug": {"type": "boolean", "description": "是否返回调试信息（可选）"},
+                        "dryRun": {"type": "boolean", "description": "只演练不点击（可选）"},
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "wecom_ui",
+                "description": "通过 UI 自动化控制企业微信：搜索联系人并发送消息（高风险，需要确认）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "contactName": {"type": "string", "description": "联系人姓名/备注（不要带前缀）"},
+                        "message": {"type": "string", "description": "要发送的消息正文"},
+                        "debug": {"type": "boolean", "description": "是否返回调试信息（可选）"},
+                        "dryRun": {"type": "boolean", "description": "只演练不点击（可选）"},
+                    },
+                    "required": ["contactName", "message"],
                 },
             },
             {
@@ -318,7 +350,85 @@ class LLMService:
         say = "好的。"
         intent_actions: list[dict[str, Any]] = []
 
-        if "我喜欢" in user_text or "喜欢的歌" in user_text or "我喜爱" in user_text:
+        def _strip_phrases(text: str, phrases: list[str]) -> str:
+            v = str(text or "")
+            for p in phrases:
+                v = v.replace(p, " ")
+            return " ".join(v.split())
+
+        if any(k in user_text for k in ["企业微信", "企微", "WeCom"]) and any(k in user_text for k in ["发消息", "发送", "发个", "发", "说"]):
+            cleaned = _strip_phrases(
+                user_text,
+                [
+                    "企业微信",
+                    "企微",
+                    "WeCom",
+                    "用",
+                    "请",
+                    "帮我",
+                    "麻烦",
+                    "一下",
+                ],
+            )
+
+            contact = ""
+            message = ""
+
+            if "给" in cleaned:
+                after_give = cleaned.split("给", 1)[1]
+                send_idx = after_give.find("发送")
+                if send_idx < 0:
+                    send_idx = after_give.find("发")
+                if send_idx < 0:
+                    send_idx = after_give.find("说")
+                if send_idx >= 0:
+                    contact = after_give[:send_idx].strip()
+
+            if ":" in cleaned or "：" in cleaned:
+                message = cleaned.split(":")[-1].split("：")[-1].strip()
+            elif "说" in cleaned:
+                message = cleaned.split("说", 1)[1].strip()
+            else:
+                # 尝试从“发送/发”之后截取消息
+                if "发送" in cleaned:
+                    message = cleaned.split("发送", 1)[1].strip()
+                elif "发" in cleaned:
+                    message = cleaned.split("发", 1)[1].strip()
+
+            message = message.replace("消息", " ").replace("信息", " ").strip()
+
+            if contact and message:
+                say = f"我可以在企业微信搜索联系人并发送消息给“{contact}”。这需要你确认一下。"
+                args = {"contactName": contact, "message": message, "debug": True}
+                tool_calls = [_tool_call("wecom_ui", args)]
+                intent_actions = [{"name": "wecom_ui", "arguments": args}]
+
+        elif any(k in user_text for k in ["抖音", "Douyin"]) and any(k in user_text for k in ["搜", "搜索", "找", "播放"]):
+            q = _strip_phrases(
+                user_text,
+                [
+                    "抖音",
+                    "Douyin",
+                    "在",
+                    "里",
+                    "用",
+                    "请",
+                    "帮我",
+                    "麻烦",
+                    "一下",
+                    "搜索",
+                    "搜",
+                    "找",
+                    "播放",
+                ],
+            )
+            if q:
+                say = f"我可以在抖音搜索并播放“{q}”。这需要你确认一下。"
+                args = {"query": q, "debug": True}
+                tool_calls = [_tool_call("douyin_ui", args)]
+                intent_actions = [{"name": "douyin_ui", "arguments": args}]
+
+        elif "我喜欢" in user_text or "喜欢的歌" in user_text or "我喜爱" in user_text:
             pick_mode = "first"
             if "随机" in user_text or "随便" in user_text:
                 pick_mode = "random"

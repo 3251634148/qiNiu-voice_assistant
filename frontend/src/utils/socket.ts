@@ -7,7 +7,7 @@ class SocketService {
   private isConnecting: boolean = false;
   private connectionPromise: Promise<void> | null = null;
 
-  constructor(serverUrl: string = "http://localhost:3001") {
+  constructor(serverUrl: string = "http://localhost:3002") {
     this.serverUrl = serverUrl;
     (window as any).socketService = this;
   }

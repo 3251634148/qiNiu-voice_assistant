@@ -289,7 +289,7 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "../frontend/dist/index.html"));
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 server.listen(PORT, () => {
   logger.info(`服务器运行在端口 ${PORT}`);
 });

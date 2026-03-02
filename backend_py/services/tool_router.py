@@ -9,11 +9,13 @@ from typing import Any, Dict, Optional, Tuple
 from backend_py.services.dev_runner import DevRunner
 from backend_py.services.file_manager import FileManager
 from backend_py.services.file_writer import FileWriter
+from backend_py.services.douyin_controller import DouyinController
 from backend_py.services.llm_service import LLMService
 from backend_py.services.macos_media_control import MacOSMediaControl
 from backend_py.services.music_controller import MusicController
 from backend_py.services.system_controller import SystemController
 from backend_py.services.wecom_service import WeComService
+from backend_py.services.wecom_ui_controller import WeComUIController
 
 
 class ToolRouter:
@@ -28,6 +30,10 @@ class ToolRouter:
         self.wecom_service = WeComService()
         self.media_control = MacOSMediaControl()
 
+        # OCR-first UI 自动化控制器（高风险：会真实点击/键入）
+        self.douyin_controller = DouyinController()
+        self.wecom_ui_controller = WeComUIController()
+
     def get_supported_tools(self) -> list[dict[str, Any]]:
         return [
             {"name": "play_music", "description": "播放音乐", "parameters": ["source", "query"]},
@@ -35,6 +41,16 @@ class ToolRouter:
                 "name": "music_ui",
                 "description": "通过 UI 自动化控制音乐播放器（需要确认）",
                 "parameters": ["player", "action", "query", "pickMode", "debug", "dryRun"],
+            },
+            {
+                "name": "douyin_ui",
+                "description": "通过 UI 自动化控制抖音：搜索并播放最匹配视频（高风险，需要确认）",
+                "parameters": ["query", "debug", "dryRun"],
+            },
+            {
+                "name": "wecom_ui",
+                "description": "通过 UI 自动化控制企业微信：搜索联系人并发送消息（高风险，需要确认）",
+                "parameters": ["contactName", "message", "debug", "dryRun"],
             },
             {
                 "name": "media_control",
@@ -144,6 +160,35 @@ class ToolRouter:
                     "name": name,
                     "success": True,
                     "result": {"action": "music_ui", **result},
+                    "timestamp": ts,
+                }
+
+            if name == "douyin_ui":
+                result = await self.douyin_controller.search_and_play(
+                    query=str(args.get("query") or "").strip(),
+                    debug=bool(args.get("debug") is True),
+                    dry_run=bool(args.get("dryRun") is True),
+                )
+                return {
+                    "toolCallId": tool_call_id,
+                    "name": name,
+                    "success": True,
+                    "result": {"action": "douyin_ui", **result},
+                    "timestamp": ts,
+                }
+
+            if name == "wecom_ui":
+                result = await self.wecom_ui_controller.search_contact_and_send(
+                    contact_name=str(args.get("contactName") or "").strip(),
+                    message=str(args.get("message") or ""),
+                    debug=bool(args.get("debug") is True),
+                    dry_run=bool(args.get("dryRun") is True),
+                )
+                return {
+                    "toolCallId": tool_call_id,
+                    "name": name,
+                    "success": True,
+                    "result": {"action": "wecom_ui", **result},
                     "timestamp": ts,
                 }
 

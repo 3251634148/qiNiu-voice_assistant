@@ -118,6 +118,8 @@ class SafetyService:
             "run_tests",
             "execute_workflow",
             "music_ui",
+            "douyin_ui",
+            "wecom_ui",
             "media_control",
         }
         if allow_local_control is False and name in local_control_tools:
@@ -197,6 +199,21 @@ class SafetyService:
                 return RiskAssessment(False, "high", "playlist/search 需要提供 query", True)
 
             # UI 自动化属于高风险（会真实点击屏幕）
+            return RiskAssessment(True, "high", "ok", True)
+
+        if name == "douyin_ui":
+            query = args.get("query")
+            if not isinstance(query, str) or not query.strip():
+                return RiskAssessment(False, "high", "douyin_ui 需要提供 query", True)
+            return RiskAssessment(True, "high", "ok", True)
+
+        if name == "wecom_ui":
+            contact_name = args.get("contactName")
+            message = args.get("message")
+            if not isinstance(contact_name, str) or not contact_name.strip():
+                return RiskAssessment(False, "high", "wecom_ui 需要提供 contactName", True)
+            if not isinstance(message, str) or not message.strip():
+                return RiskAssessment(False, "high", "wecom_ui 需要提供 message", True)
             return RiskAssessment(True, "high", "ok", True)
 
         if name == "media_control":
@@ -299,6 +316,12 @@ class SafetyService:
             suggestions.append("此操作可能影响本地文件，请确认是否继续")
         elif name == "music_ui":
             suggestions.append("此操作将通过 UI 自动化点击屏幕并控制播放器，请确认是否继续")
+        elif name == "douyin_ui":
+            q = str(args.get("query") or "").strip()
+            suggestions.append(f"将打开抖音并搜索播放：{q}")
+        elif name == "wecom_ui":
+            target = str(args.get("contactName") or "").strip()
+            suggestions.append(f"将打开企业微信并发送消息给：{target}")
 
         return {
             "id": confirmation_id,
@@ -324,6 +347,10 @@ class SafetyService:
             return f"发送消息给: {args.get('target')}"
         if name == "music_ui":
             return f"UI 自动化音乐控制: {args.get('player')} / {args.get('action')} / {args.get('query')}"
+        if name == "douyin_ui":
+            return f"UI 自动化抖音: 搜索并播放 {args.get('query')}"
+        if name == "wecom_ui":
+            return f"UI 自动化企业微信: 发消息给 {args.get('contactName')}"
         if name == "media_control":
             return f"系统媒体控制: {args.get('action')}"
         if name == "write_run_code":

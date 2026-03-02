@@ -17,7 +17,7 @@ class Settings:
     """运行时配置（从环境变量加载）。"""
 
     def __init__(self) -> None:
-        self.port = int(os.getenv("PORT", "3001"))
+        self.port = int(os.getenv("PORT", "3002"))
         self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY", "")
 
         # 联网信息能力（MCP Client 工具）

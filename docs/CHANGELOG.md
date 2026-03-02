@@ -1,3 +1,106 @@
+## 2026-03-01（第三批修复 — 企微端到端测试两个根因修复）
+
+### 🔧 问题修复
+- **修复企微聊天列表滚动导致直达匹配失败**：
+  - **根因**：代码先执行 `Cmd+1` 切换到消息 tab（已完成切换），随后又 OCR 找到"消息"按钮并点击，这个冗余点击触发了聊天列表刷新/滚动，导致目标联系人从可视范围消失。
+  - **证据**：`wecom_after_go_messages` 与 `wecom_flow_init` PNG 大小完全相同（1374319 bytes），证明 `Cmd+1` 未导致滚动；`wecom_chat_list_probe`（点击"消息"后）PNG 大小变为 1335479，罗晨曦消失。
+  - **修复**：删除冗余的 OCR+点击"消息"按钮逻辑，仅保留 `Cmd+1` 快捷键 + 增加等待时间（0.15s→0.35s）。
+- **修复企微全局搜索弹窗流程完全失效（截图+OCR+Escape 三处根因）**：
+  - **根因1**：`screenshot_window` 的 `_find_best_window_sync` 按窗口面积排序取最大值，全局搜索弹窗面积远小于主窗口，因此始终截取主窗口（windowId=29725），所有后续 OCR 都在主窗口上执行，找不到弹窗中的搜索结果和 tabs。
+  - **根因2**：`hotkey("escape")` 使用 AppleScript `keystroke "escape"` 输入的是字符串 "escape" 文本，而非发送 Escape 键码（应使用 `key code 53`）。
+  - **证据**：12张截图 windowId 全是 29725；`searchTabsPreview` 识别到聊天列表内容而非弹窗 tabs；用户亲眼看到搜索框出现 "escape" 文字。
+  - **修复**：放弃"截图+OCR 在弹窗中操作"策略，改为纯键盘导航：`Shift+Cmd+F` 打开弹窗 → 输入联系人名 → `Return`（key_code 36）选中第一个结果 → `key_code(53)` 关闭弹窗 → 截图验证主窗口标题区是否切换成功。所有 `hotkey("escape")` 替换为 `key_code(53)`。
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/services/wecom_ui_controller.py` | 删除冗余"消息"按钮点击；全局搜索弹窗改为纯键盘导航；`hotkey("escape")`→`key_code(53)` |
+| `docs/CHANGELOG.md` | 记录本次变更 |
+
+## 2026-03-01（第二批修复 — 端到端测试失败）
+
+### 🔧 问题修复
+- **修复抖音视频 tab 切换后点击到"相关搜索"而非视频内容**：
+  - **根因**：视频 tab 切换后仅等 0.5s，视频封面/标题尚未加载（全是占位图），但右侧"相关搜索"已完全加载。`results_content` ROI 宽度 0.96 覆盖了右侧"相关搜索"区域，OCR 将右侧文本当作有效候选，轮询条件立即满足并退出。
+  - **修复**：
+    1. `results_content` ROI 宽度从 0.96 收窄到 0.62，排除 x>0.64 的右侧"相关搜索"区域
+    2. 视频 tab 切换后最小等待从 0.5s 增加到 1.5s
+    3. 轮询退出条件增加 `content_poll_elapsed >= 2.0` 最低等待保护
+- **修复企业微信备用搜索流程执行异常（发消息失败）**：
+  - **根因**：备用搜索流程使用 `Cmd+F` 后直接在搜索框内输入联系人并回车，走的是内联搜索而非全局搜索弹窗。点击联系人后搜索面板未关闭，`Cmd+A`+`Cmd+X` 剪切的是搜索框内的联系人名字（3字）而非聊天输入框草稿，导致消息发送到错误位置。
+  - **修复**：
+    1. 备用搜索流程从 `Cmd+F` 改为 `Shift+Cmd+F`（全局搜索弹窗），在弹窗中输入联系人 → 点击"联系人" tab → 点击搜索结果 → Escape 关闭弹窗
+    2. 发送消息前新增焦点保障：先点击聊天输入区域（x≈0.65, y≈0.85），确保焦点不在搜索框
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/services/douyin_controller.py` | ROI 宽度 0.96→0.62；最小等待 0.5s→1.5s；轮询退出增加 ≥2.0s 保护 |
+| `backend_py/services/wecom_ui_controller.py` | 重写备用搜索流程为 Shift+Cmd+F 全局搜索弹窗；发送前新增点击输入区域确保焦点 |
+| `docs/CHANGELOG.md` | 记录本次变更 |
+
+## 2026-03-01
+
+### 🔧 问题修复
+- **修复前端无法连接服务器（"正在连接服务器"）**：
+  - **根因**：CodeBuddy（IDE）进程占用了 `localhost:3001` 端口，拦截所有 HTTP/WS 请求并返回 `426 Upgrade Required`，导致前端 Socket.IO 永远无法与 Python 后端建立连接。
+  - **修复**：将前后端通信端口从 `3001` 统一改为 `3002`（前端 `socket.ts`、Python `config.py`、Node `server.js`、`package.json`、`start.sh`）。
+- **修复抖音搜索框 fallback 点击 y 偏移问题**：
+  - **根因**：`_fallback_click_point` 中 y 系数为 `0.55`，导致 `y_norm=0.066`（image_y≈106），实际搜索框中心在 `y_norm≈0.03`（image_y≈48），点击落在搜索框下方。
+  - **修复**：将 y 系数从 `0.55` 降为 `0.25`，使 `y_norm = 0.00 + 0.12 × 0.25 = 0.03`，精准命中搜索框中心。
+  - **验证**：dry-run 确认 fallback 坐标 image_y=48（正确）；真实执行成功进入搜索结果页（综合→视频 tab），选择并播放 "貔柴解说甄嬛传"。
+- **修复企业微信发送前标题区 OCR 校验 7 次全部失败的 bug**：
+  - **根因**：`chat_header` ROI 默认值 `(0.42, 0.10, 0.56, 0.12)` 偏移到聊天内容区（y=0.10 远低于实际标题位置 y≈0.01~0.03，x=0.42 也偏右），导致 OCR 识别的不是标题文字而是聊天消息内容。
+  - **修复**：将 `chat_header` ROI 修正为 `(0.33, 0.01, 0.35, 0.08)`，经离线 OCR 对照实验（13 组 ROI × 多种 scale/accurate 参数组合）验证，该配置在 x=0.30~0.36、y=0.00~0.03 区间内稳定命中标题文字。
+  - **验证**：真实发送测试通过（联系人"罗晨曦"，标题校验在 attempt 2 通过）。
+- **修复异常路径不落盘 workflow JSON**：将核心逻辑拆分为 `_search_contact_and_send_inner`，外层用 `try/except` 包裹，异常时也调用 `_dump_json_once("wecom_workflow_debug_error")` 确保诊断数据（`chatHeaderPreview`、`chatHeaderPick` 等）不丢失。
+
+### 🧪 测试
+- 新增离线 OCR 对照实验脚本：
+  - `test_scripts/debug_wecom_header_ocr_roi.py`（v1：大范围 ROI 扫描）
+  - `test_scripts/debug_wecom_header_ocr_roi_v2.py`（v2：围绕命中区域微调）
+- 测试联系人从"顾老师"切换为"罗晨曦"（更新测试脚本文档中的示例命令）。
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/services/wecom_ui_controller.py` | 修正 `chat_header` ROI 默认值；拆分 `_search_contact_and_send_inner`，异常路径兜底落盘 JSON |
+| `backend_py/services/douyin_controller.py` | 修复 `_fallback_click_point` y 系数 0.55→0.25，修正搜索框点击偏移 |
+| `frontend/src/utils/socket.ts` | Socket.IO 连接端口 3001→3002 |
+| `backend_py/config.py` | 默认端口 3001→3002 |
+| `backend/server.js` | 默认端口 3001→3002 |
+| `package.json` | `dev:backend_py` 脚本端口 3001→3002 |
+| `start.sh` | 端口提示与 .env 模板 3001→3002 |
+| `test_scripts/debug_wecom_search_send_flow.py` | 文档示例联系人从"顾老师"改为"罗晨曦" |
+| `test_scripts/debug_wecom_header_ocr_roi.py` | 新增：离线 OCR 对照实验 v1 |
+| `test_scripts/debug_wecom_header_ocr_roi_v2.py` | 新增：离线 OCR 对照实验 v2 |
+| `docs/CHANGELOG.md` | 记录本次变更 |
+
+## 2026-02-23
+
+### ✨ 功能增强
+- 新增 UI 自动化工具：`douyin_ui`（抖音搜索并播放最匹配视频）与 `wecom_ui`（企业微信搜索联系人并发送消息），采用 OCR-first（窗口级截图 + ROI OCR + 坐标映射点击）方案，调试产物按 `VOICE_ASSISTANT_DEBUG_RUN` 落盘到 `ui_debug/<runId>/`。
+- 工具链路接入：补齐 `ToolRouter` 路由执行、`SafetyService` 高风险确认与参数校验、`LLMService` tools schema 与提示词约束（含 query/contact/message 生成规则）。
+
+### 🧪 测试
+- 新增调试脚本：
+  - `test_scripts/debug_douyin_search_play_flow.py`
+  - `test_scripts/debug_wecom_search_send_flow.py`
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/services/tool_router.py` | 注册并路由执行 `douyin_ui/wecom_ui` |
+| `backend_py/safety.py` | 两工具高风险确认、参数校验、确认摘要补齐 |
+| `backend_py/services/llm_service.py` | tools schema + 提示词约束，stub 增加基础识别 |
+| `backend_py/services/douyin_controller.py` | 新增：抖音 OCR-first 工作流控制器 |
+| `backend_py/services/wecom_ui_controller.py` | 新增：企业微信 OCR-first 工作流控制器 |
+| `backend_py/services/ui_workflow_utils.py` | 新增：ui_debug/ROI/剪贴板/裁剪等通用工具 |
+| `test_scripts/debug_douyin_search_play_flow.py` | 新增：抖音工作流可复现脚本 |
+| `test_scripts/debug_wecom_search_send_flow.py` | 新增：企业微信工作流可复现脚本 |
+| `temp_md/2026-02-23_douyin_wecom_ui_tools.md` | 新增：本次接入记录 |
+| `docs/CHANGELOG.md` | 记录本次变更 |
+
 ## 2026-02-16
 
 ### ✨ 功能增强

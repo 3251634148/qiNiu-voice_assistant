@@ -34,7 +34,7 @@ if [ ! -f "backend/.env" ]; then
 DASHSCOPE_API_KEY=
 
 # 可选：端口覆盖
-PORT=3001
+PORT=3002
 EOF
 
     echo "请编辑 backend/.env 文件，填入你的 API 密钥（如 DASHSCOPE_API_KEY）"
@@ -46,7 +46,7 @@ mkdir -p backend/logs
 
 echo "🚀 启动开发服务器..."
 echo "前端地址: http://localhost:5173"
-echo "后端地址: http://localhost:3001"
+echo "后端地址: http://localhost:3002"
 echo "按 Ctrl+C 停止服务器"
 echo ""
 
