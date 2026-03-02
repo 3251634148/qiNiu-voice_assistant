@@ -50,5 +50,34 @@ class Settings:
         except Exception:
             self.wecom_agent_id = 0
 
+        # LLM 提供者配置
+        # - dashscope（默认）：使用阿里云千问（DashScope）远程 API
+        # - ollama：使用本地 Ollama 部署的模型
+        self.llm_provider = os.getenv("LLM_PROVIDER", "dashscope").strip().lower()
+        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").strip()
+        self.ollama_model = os.getenv(
+            "OLLAMA_MODEL",
+            "wangshenzhi/llama3-8b-chinese-chat-ollama-q4",
+        ).strip()
+
+        # 全局热键唤醒语音接收
+        # 热键格式兼容 pynput：例如 "<cmd>+<shift>+<space>"
+        self.hotkey_trigger = os.getenv("HOTKEY_TRIGGER", "<cmd>+<shift>+<space>").strip()
+        # stop 热键已弃用：使用 trigger 的 toggle 模式（按一次开始，按一次停止）。
+        self.hotkey_stop = os.getenv("HOTKEY_STOP", "<cmd>+<shift>+s").strip()
+        self.hotkey_enabled = os.getenv("HOTKEY_ENABLED", "1").strip().lower() in {"1", "true", "yes"}
+        # hotkey 产生的请求应绑定到哪个客户端（用于复用 Web 端配置并推送 TTS 音频）
+        self.hotkey_client_id = os.getenv("HOTKEY_CLIENT_ID", "desktop").strip() or "desktop"
+
+        # 硬件语音模块（ESP32 WebSocket）
+        self.hardware_ws_enabled = os.getenv("HARDWARE_WS_ENABLED", "0").strip().lower() in {"1", "true", "yes"}
+
+        # 本地 LLM 长期记忆
+        self.memory_enabled = os.getenv("MEMORY_ENABLED", "1").strip().lower() in {"1", "true", "yes"}
+        self.memory_dir = os.getenv(
+            "MEMORY_DIR",
+            str(Path.home() / ".voice_assistant" / "memory"),
+        ).strip()
+
 
 settings = Settings()

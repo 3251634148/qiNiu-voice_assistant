@@ -1,14 +1,17 @@
+import asyncio
 import logging
 import time
 from typing import Any, Dict, Optional
 
 import socketio
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend_py.config import settings
 from backend_py.controllers.conversation_controller import ConversationController
 from backend_py.logging_setup import log_extra, setup_logging
+from backend_py.services.hardware_voice_service import HardwareVoiceService
+from backend_py.services.hotkey_voice_service import HotkeyVoiceService
 
 
 setup_logging()
@@ -24,6 +27,15 @@ sio = socketio.AsyncServer(
 )
 
 controller = ConversationController(sio=sio)
+
+# 全局热键唤醒语音接收
+_hotkey_service: Optional[HotkeyVoiceService] = None
+
+# ESP32 硬件语音模块 WebSocket 服务
+_hardware_voice_service: Optional[HardwareVoiceService] = None
+if settings.hardware_ws_enabled:
+    _hardware_voice_service = HardwareVoiceService()
+    _hardware_voice_service.set_controller(controller)
 
 # connection limiter: ip -> last_ts
 _connection_limiter: Dict[str, float] = {}
@@ -44,6 +56,15 @@ async def health() -> Dict[str, Any]:
     return {"status": "ok", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
+@app.websocket("/ws/hardware")
+async def hardware_ws_endpoint(websocket: WebSocket) -> None:
+    """ESP32 硬件语音模块 WebSocket 端点。"""
+    if _hardware_voice_service is None:
+        await websocket.close(code=1008, reason="硬件 WebSocket 未启用")
+        return
+    await _hardware_voice_service.handle_websocket(websocket)
+
+
 @app.get("/api/capabilities")
 async def capabilities() -> Dict[str, Any]:
     return {
@@ -56,6 +77,9 @@ async def capabilities() -> Dict[str, Any]:
         "safetyValidation": True,
         "sessionManagement": True,
         "toolExecution": True,
+        "hotkeyVoice": settings.hotkey_enabled,
+        "hardwareWebSocket": settings.hardware_ws_enabled,
+        "hardwareDevices": _hardware_voice_service.connected_count if _hardware_voice_service else 0,
         "supportedTools": controller.get_supported_tool_names(),
     }
 
@@ -70,15 +94,21 @@ async def stats() -> Dict[str, Any]:
 
 @sio.event
 async def connect(sid: str, environ: Dict[str, Any], auth: Optional[Dict[str, Any]]) -> bool:
-    client_ip = environ.get("REMOTE_ADDR") or environ.get("HTTP_X_FORWARDED_FOR") or "unknown"
+    raw_ip = environ.get("REMOTE_ADDR") or environ.get("HTTP_X_FORWARDED_FOR") or "unknown"
+    client_ip = str(raw_ip).split(",")[0].strip() if raw_ip else "unknown"
     now = time.time()
 
-    last = _connection_limiter.get(client_ip)
-    if last and (now - last) < 1.0:
-        logger.warning("拒绝频繁连接 %s", log_extra(ip=client_ip, sid=sid))
-        return False
+    # NOTE: 本机开发 / Electron 本地客户端在握手、升级、重连时可能出现短时间多次连接。
+    # 为避免误伤，localhost 不启用连接限流。
+    is_local = client_ip in {"127.0.0.1", "::1", "localhost"} or client_ip.startswith("127.")
 
-    _connection_limiter[client_ip] = now
+    if not is_local:
+        last = _connection_limiter.get(client_ip)
+        if last and (now - last) < 1.0:
+            logger.warning("拒绝频繁连接 %s", log_extra(ip=client_ip, sid=sid))
+            return False
+        _connection_limiter[client_ip] = now
+
     controller.on_connect(sid)
 
     logger.info("客户端连接 %s", log_extra(ip=client_ip, sid=sid))
@@ -102,6 +132,25 @@ async def voice_input(sid: str, data: Dict[str, Any]) -> None:
         language=language,
         request_id=request_id,
     )
+
+
+@sio.on("register-client")
+async def register_client(sid: str, data: Dict[str, Any]) -> None:
+    client_id = str((data or {}).get("clientId") or "").strip()
+    if not client_id:
+        await sio.emit("client-registered", {"success": False, "error": "clientId 不能为空"}, to=sid)
+        return
+
+    room = f"client:{client_id}"
+    await sio.enter_room(sid, room)
+    controller.register_client(sid, client_id=client_id)
+
+    logger.info("client 注册成功 %s", log_extra(sid=sid, clientId=client_id, room=room))
+
+    await sio.emit("client-registered", {"success": True, "clientId": client_id, "room": room}, to=sid)
+
+    # 发送一个 room ping，便于确认 room 投递链路可达（仅用于观测）。
+    await sio.emit("client-room-ping", {"clientId": client_id, "room": room, "ts": int(time.time() * 1000)}, to=room)
 
 
 @sio.on("text-command")
@@ -186,6 +235,30 @@ async def get_tts_settings(sid: str) -> None:
 async def get_available_voices(sid: str) -> None:
     result = controller.get_available_voices()
     await sio.emit("available-voices", result, to=sid)
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    """应用启动时初始化全局热键服务。"""
+    global _hotkey_service  # noqa: PLW0603
+    if settings.hotkey_enabled:
+        try:
+            loop = asyncio.get_running_loop()
+            _hotkey_service = HotkeyVoiceService(loop=loop)
+            _hotkey_service.set_controller(controller)
+            _hotkey_service.start()
+        except Exception as e:
+            logger.warning("全局热键服务启动失败: %s", e)
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    """应用关闭时停止全局热键服务。"""
+    if _hotkey_service is not None:
+        try:
+            _hotkey_service.stop()
+        except Exception:
+            pass
 
 
 asgi_app = socketio.ASGIApp(sio, other_asgi_app=app)

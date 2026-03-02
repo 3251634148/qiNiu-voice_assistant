@@ -35,6 +35,31 @@ class SessionStore:
         self.session_timeout = timedelta(hours=2)
         self.confirmation_timeout = timedelta(minutes=5)
 
+    def migrate(self, from_id: str, to_id: str) -> None:
+        """将会话从一个 id 迁移到另一个 id。
+
+        用于 socket 连接 sid 与稳定 clientId 绑定后，把 session 从 sid 迁移到 clientId。
+
+        规则：
+        - 若 from_id 不存在：不做任何事
+        - 若 to_id 已存在：保留 to_id，会丢弃 from_id（避免覆盖已存在会话）
+        """
+        if not from_id or not to_id or from_id == to_id:
+            return
+
+        src = self._sessions.get(from_id)
+        if not src:
+            return
+
+        if to_id in self._sessions:
+            self._sessions.pop(from_id, None)
+            return
+
+        self._sessions[to_id] = src
+        self._sessions.pop(from_id, None)
+        src.session_id = to_id
+        src.last_activity = datetime.utcnow()
+
     def get_or_create(self, sid: str) -> Session:
         if sid not in self._sessions:
             self._sessions[sid] = Session(session_id=sid)

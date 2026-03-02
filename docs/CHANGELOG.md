@@ -1,3 +1,78 @@
+## 2026-03-02（新功能迭代 — LLM 配置化 / 长期记忆 / 热键唤醒 / ESP32 对接）
+
+### 🔧 问题修复
+- **修复热键 `<cmd>+<shift>+s` 停止录音与系统"另存为"快捷键冲突**：
+  - **根本原因**：macOS 上 pynput Listener 无法拦截按键事件传递给前台应用，`Cmd+Shift+S` 同时被前台应用识别为"另存为"
+  - **修复**：取消独立的停止录音热键，改为 toggle 模式——同一个热键 `Cmd+Shift+Space` 按第一次开始录音、按第二次停止录音
+- **修复热键录音链路与 Web 端会话不一致（权限/配置/音色/TTS 推送丢失）**：
+  - **根本原因**：热键链路使用虚拟 sid（例如 `__hotkey__`），与真实 Socket.IO sid 不同，导致会话态（`network_access_enabled`/`device_location_enabled`/`tts_settings` 等）不共享；同时 `sio.emit(..., to=sid)` 也无法推送到任何真实客户端，表现为无法播放指定音色的 TTS
+  - **修复**：新增 `register-client` 机制，将 socket sid 绑定到稳定 `clientId` 并加入 room（`client:<clientId>`）；热键请求优先绑定到 `client:<HOTKEY_CLIENT_ID>`（默认 `desktop`），若该 clientId 当前不在线则自动 fallback 到最近在线的 clientId（例如 `web_...`），确保热键请求必能回传并复用当前客户端配置
+- **修复本机 Electron/前端连接被 Socket.IO 连接限流误伤，导致 room 无成员、TTS 听不到**：
+  - **根本原因**：本机环境下 Socket.IO 可能在握手/升级/重连阶段产生短时间多次连接，原限流策略会拒绝这些连接，导致 `register-client` 无法稳定完成、`client:<clientId>` room 为空
+  - **修复**：后端对 localhost 连接跳过限流；前端强制使用 websocket 传输，减少多次握手连接
+- **修复天气兜底 web_search 调用时 `NameError: name '_exec_one' is not defined`**：
+  - **根本原因**：`_maybe_run_network_tool_loop` 方法内第 1221 行调用了 `_exec_one(fallback_call)`，但该内部函数从未定义；方法内只有 `_exec_device_location` 和 `_exec_network` 两个内部函数，`_exec_one` 是历史重构残留
+  - **修复**：将 `_exec_one(fallback_call)` 替换为 `_exec_network(fallback_call)`
+- **修复天气兜底 web_search 后未生成最终答案（只说“我马上去搜”）**：
+  - **根本原因**：兜底阶段再次调用 LLM 时仍允许 tools，模型可能再次生成 `web_search` 意图而非总结工具结果
+  - **修复**：在兜底 web_search 工具结果回填后注入 system hint，要求直接总结并将 `INTENT_JSON.actions` 置空；同时该总结阶段显式禁用 tools，保证输出为最终回答
+- **修复 conversation_controller.py 和 memory_service.py 中中文引号被替换为 ASCII 双引号导致的 SyntaxError**：
+  - 5 处 f-string/字符串中的 `\u201c`/`\u201d` 被损坏为 ASCII `"`，导致字符串定界符冲突
+  - 受影响行：conversation_controller.py 第 1434/1480/1495/1518/1709 行，memory_service.py 第 27/37 行
+- **修复 pynput 热键格式错误**：默认热键 `<cmd>+<shift>+space` 改为 `<cmd>+<shift>+<space>`（`space` 需要用 `<>` 包裹）
+- **修复 pynput 1.8.x GlobalHotKeys 在 macOS 上崩溃导致热键永久失效**：
+  - **根本原因**：pynput 1.8.1 的 `_darwin.py` 第 313 行（`Listener._handle_message` 的 `NSSystemDefined` 媒体键分支）调用 `self.on_press(self._SPECIAL_KEYS[key])` 时缺少 `injected` 参数，而 `GlobalHotKeys._on_press(self, key, injected)` 需要 2 个位置参数，导致 `TypeError`。崩溃后 pynput 内部异常处理器将监听线程标记为失败，后续所有热键均无响应。
+  - **修复**：不使用有 bug 的 `GlobalHotKeys`，改用底层 `Listener` + `HotKey` 手动组合，`on_press`/`on_release` 回调签名使用 `*args` 兼容 `injected` 参数的有无
+- **修复热键 `<cmd>+<shift>+<space>` 按下后无响应**：
+  - **根本原因**：Listener 回调收到空格键时传入 `Key.space`（枚举类型），但 `HotKey.parse('<space>')` 产出的是 `KeyCode(vk=49)`（虚拟键码），两者 `__eq__` 返回 `False`，导致 `HotKey.press()` 内部集合匹配永远不成立。自定义 `_canonical` 方法仅处理了 `KeyCode` 带 `char` 的字母键场景，未处理 `Key` 枚举 → `KeyCode` 的转换。
+  - **修复**：将 `on_press`/`on_release` 中的按键规范化从自定义 `_canonical` 改为使用 pynput 内置的 `Listener.canonical()` 实例方法，该方法能正确将 `Key.space` → `KeyCode(vk=49)`，同时将左右修饰键统一为通用形式。
+
+### ✨ 新功能
+
+#### 模块3：LLM 提供者配置化
+- 支持通过环境变量 `LLM_PROVIDER` 切换 DashScope（远程）和 Ollama（本地）两种 LLM 后端
+- Ollama 使用 OpenAI 兼容 API（`http://localhost:11434/v1`），默认模型 `wangshenzhi/llama3-8b-chinese-chat-ollama-q4`
+- 新增配置项：`LLM_PROVIDER`、`OLLAMA_BASE_URL`、`OLLAMA_MODEL`
+
+#### 模块4：本地 LLM 长期记忆系统
+- 新增 `MemoryService`：管理 user_profile（JSON 偏好）+ rolling_summary（滚动摘要）
+- 每次 LLM 调用自动注入记忆上下文到 system prompt
+- 每轮对话后异步更新滚动摘要（通过 LLM 生成）
+- 检测到偏好触发词（"以后/记住/我叫/我喜欢..."）时自动抽取并持久化用户偏好
+- 存储路径：`~/.voice_assistant/memory/`
+- 新增配置项：`MEMORY_ENABLED`、`MEMORY_DIR`
+
+#### 模块1：全局热键唤醒语音接收
+- 新增 `HotkeyVoiceService`：通过 pynput 全局热键监听 + sounddevice 麦克风录音
+- 默认热键：`Cmd+Shift+Space`（开始录音）、`Cmd+Shift+S`（停止录音）
+- 录音完成后自动打包 WAV 并注入 `handle_voice_input` 链路
+- 应用启动时自动初始化（可通过 `HOTKEY_ENABLED=0` 禁用）
+- 新增配置项：`HOTKEY_TRIGGER`、`HOTKEY_STOP`、`HOTKEY_ENABLED`
+
+#### 模块2：ESP32 WiFi WebSocket 对接
+- 新增 `HardwareVoiceService`：管理 ESP32 硬件模块的 WebSocket 连接和双向音频传输
+- WebSocket 端点：`/ws/hardware`
+- 支持 ESP32 发送 PCM 音频帧 + JSON 控制帧（start_record/stop_record/text_command/ping）
+- 支持向 ESP32 下发 TTS 音频 + JSON 状态帧
+- 硬件方案：ESP32-S3-N16R8 + INMP441 麦克风 + MAX98357A 功放
+- 新增配置项：`HARDWARE_WS_ENABLED`
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/config.py` | 新增 LLM_PROVIDER/Ollama/热键/硬件 WS/记忆 相关配置项 |
+| `backend_py/services/llm_service.py` | 支持 DashScope/Ollama 双后端切换；invoke_llm 新增 memory_context 参数 |
+| `backend_py/services/memory_service.py` | **新增**：MemoryService（偏好/摘要管理、记忆上下文构建、偏好抽取触发） |
+| `backend_py/services/hotkey_voice_service.py` | **新增**：HotkeyVoiceService（pynput 热键 + sounddevice 录音） |
+| `backend_py/services/hardware_voice_service.py` | **新增**：HardwareVoiceService（ESP32 WebSocket 双向通信） |
+| `backend_py/controllers/conversation_controller.py` | 集成 MemoryService：初始化、注入记忆上下文、异步摘要更新、偏好抽取 |
+| `backend_py/main.py` | 启动热键服务、注册 /ws/hardware 端点、capabilities 增加新能力字段 |
+| `backend_py/requirements.txt` | 新增 pynput、sounddevice、numpy 依赖 |
+| `hardware_recommendations.txt` | **新增**：ESP32-S3 硬件推荐方案及接线参考 |
+| `docs/CHANGELOG.md` | 记录本次变更 |
+
+---
+
 ## 2026-03-01（第三批修复 — 企微端到端测试两个根因修复）
 
 ### 🔧 问题修复

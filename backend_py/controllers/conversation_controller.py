@@ -14,6 +14,7 @@ from backend_py.safety import RiskAssessment, SafetyService
 from backend_py.services.asr_service import ASRService
 from backend_py.services.device_location_service import DeviceLocationService
 from backend_py.services.llm_service import LLMService
+from backend_py.services.memory_service import MemoryService
 from backend_py.services.network_tools_service import NetworkToolsService
 from backend_py.services.system_controller import SystemController
 from backend_py.services.tool_router import ToolRouter
@@ -35,22 +36,123 @@ class ConversationController:
         self.device_location_service = DeviceLocationService()
         self.tts_service = TTSService()
         self.asr_service = ASRService()
+        self.memory_service = MemoryService()
         self.tool_router = ToolRouter(llm_service=self.llm_service)
 
+        # 以“会话 id”维度管理 TTS 任务：
+        # - 若客户端注册了 clientId，则会话 id 为 clientId（跨重连稳定）
+        # - 否则会话 id 为 socket sid
         self._tts_tasks: Dict[str, asyncio.Task] = {}
+
+        # socket sid -> clientId 映射（用于把“配置/权限/历史”绑定到稳定 clientId）
+        self._sid_to_client_id: Dict[str, str] = {}
+
+        # clientId -> active connection count（用于热键目标选择与 fallback）
+        self._client_active_counts: Dict[str, int] = {}
+        self._last_registered_client_id: Optional[str] = None
+
         self.connected_count = 0
 
+    @staticmethod
+    def _client_room(client_id: str) -> str:
+        return f"client:{client_id}"
+
+    def register_client(self, sid: str, *, client_id: str) -> None:
+        """绑定 socket sid 到稳定 clientId。
+
+        绑定后：
+        - session 的 key 由 sid 迁移为 clientId
+        - 后续 emit 使用 room=client:{clientId}，而不是 to=sid
+        """
+        client_id_s = str(client_id or "").strip()
+        if not client_id_s:
+            return
+
+        prev_client_id = self._sid_to_client_id.get(sid)
+        if prev_client_id and prev_client_id != client_id_s:
+            self._client_active_counts[prev_client_id] = max(0, int(self._client_active_counts.get(prev_client_id, 1)) - 1)
+            if self._client_active_counts.get(prev_client_id, 0) <= 0:
+                self._client_active_counts.pop(prev_client_id, None)
+
+        self._sid_to_client_id[sid] = client_id_s
+        self._client_active_counts[client_id_s] = int(self._client_active_counts.get(client_id_s, 0)) + 1
+        self._last_registered_client_id = client_id_s
+
+        self.session_store.migrate(sid, client_id_s)
+
+        task = self._tts_tasks.pop(sid, None)
+        if task is not None:
+            self._tts_tasks[client_id_s] = task
+
+    def resolve_hotkey_emit_to(self, preferred_client_id: str) -> Tuple[str, str]:
+        """为热键请求选择一个可投递的 emit_to。
+
+        选择策略：
+        1) 若 preferred_client_id 在线（count>0），则选它。
+        2) 否则选最近一次注册且仍在线的 clientId。
+        3) 否则选任意一个在线 clientId（按字典序稳定选择）。
+        4) 若无任何在线 clientId，则仍返回 preferred 的 room（此时会静默丢弃），并记录警告。
+        """
+        preferred = str(preferred_client_id or "").strip() or "desktop"
+
+        if int(self._client_active_counts.get(preferred, 0)) > 0:
+            return preferred, self._client_room(preferred)
+
+        last = str(self._last_registered_client_id or "").strip()
+        if last and int(self._client_active_counts.get(last, 0)) > 0:
+            logger.warning("热键目标 clientId=%s 不在线，fallback 到最近在线 clientId=%s", preferred, last)
+            return last, self._client_room(last)
+
+        online = sorted([cid for cid, n in self._client_active_counts.items() if int(n) > 0])
+        if online:
+            chosen = online[0]
+            logger.warning("热键目标 clientId=%s 不在线，fallback 到在线 clientId=%s", preferred, chosen)
+            return chosen, self._client_room(chosen)
+
+        logger.warning("热键目标 clientId=%s 不在线且当前无任何在线 clientId，无法投递回复", preferred)
+        return preferred, self._client_room(preferred)
+
+    def _resolve_session_and_emit_to(self, sid: str) -> Tuple[str, str]:
+        """将输入 sid 解析为 session_id 与 emit_to。
+
+        支持两种 sid 形态：
+        - socket sid（来自客户端连接）
+        - room sid："client:<clientId>"（用于热键等无 socket sid 的场景）
+        """
+        raw = str(sid or "").strip()
+        if raw.startswith("client:"):
+            client_id = raw.split(":", 1)[1].strip()
+            if client_id:
+                return client_id, raw
+
+        client_id = self._sid_to_client_id.get(raw)
+        if client_id:
+            return client_id, self._client_room(client_id)
+
+        return raw, raw
     def get_supported_tool_names(self) -> list[str]:
         return [t["name"] for t in self.tool_router.get_supported_tools()]
 
     def on_connect(self, sid: str) -> None:
         self.connected_count += 1
-        self.session_store.get_or_create(sid)
 
     def on_disconnect(self, sid: str) -> None:
         self.connected_count = max(0, self.connected_count - 1)
-        self.stop_tts(sid)
-        self.session_store.clear(sid)
+
+        session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+        self.stop_tts(session_id)
+
+        # 若该 sid 绑定了 clientId，则不清理会话（保证重连后配置/历史仍在）。
+        if sid in self._sid_to_client_id:
+            client_id = self._sid_to_client_id.pop(sid, None)
+            if client_id:
+                self._client_active_counts[client_id] = max(0, int(self._client_active_counts.get(client_id, 1)) - 1)
+                if self._client_active_counts.get(client_id, 0) <= 0:
+                    self._client_active_counts.pop(client_id, None)
+            return
+
+        self.session_store.clear(session_id)
+        self._tts_tasks.pop(session_id, None)
 
     @staticmethod
     def _coerce_audio_bytes(audio_data: Any) -> bytes:
@@ -78,6 +180,8 @@ class ConversationController:
         language: str,
         request_id: Optional[str],
     ) -> None:
+        session_id, emit_to = self._resolve_session_and_emit_to(sid)
+
         audio_bytes = self._coerce_audio_bytes(audio_data)
         if not audio_bytes:
             await self.sio.emit(
@@ -88,7 +192,7 @@ class ConversationController:
                     "requestId": request_id,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
-                to=sid,
+                to=emit_to,
             )
             return
 
@@ -104,7 +208,7 @@ class ConversationController:
                     "requestId": request_id,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
-                to=sid,
+                to=emit_to,
             )
             return
 
@@ -118,7 +222,7 @@ class ConversationController:
                     "requestId": request_id,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
-                to=sid,
+                to=emit_to,
             )
             return
 
@@ -130,27 +234,31 @@ class ConversationController:
                 "requestId": request_id,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             },
-            to=sid,
+            to=emit_to,
         )
 
-        await self.handle_text_command(sid=sid, text=recognized_text, request_id=request_id)
+        # 注意：文本处理链路使用同一个 emit_to（room 或 socket sid）来保证结果可回传。
+        await self.handle_text_command(sid=emit_to, text=recognized_text, request_id=request_id)
 
     def _gen_request_id(self, sid: str) -> str:
         return f"req_{sid}_{int(time.time() * 1000)}_{random.randint(100000, 999999)}"
 
     def reset_tts_stop(self, sid: str) -> None:
-        session = self.session_store.get_or_create(sid)
+        session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+        session = self.session_store.get_or_create(session_id)
         session.tts_stopped = False
 
     def is_tts_stopped(self, sid: str) -> bool:
-        session = self.session_store.get_or_create(sid)
+        session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+        session = self.session_store.get_or_create(session_id)
         return session.tts_stopped is True
 
     def stop_tts(self, sid: str) -> None:
-        session = self.session_store.get_or_create(sid)
+        session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+        session = self.session_store.get_or_create(session_id)
         session.tts_stopped = True
 
-        task = self._tts_tasks.pop(sid, None)
+        task = self._tts_tasks.pop(session_id, None)
         if task and not task.done():
             task.cancel()
 
@@ -163,7 +271,8 @@ class ConversationController:
 
     def update_tts_settings(self, sid: str, settings: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            session = self.session_store.get_or_create(sid)
+            session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+            session = self.session_store.get_or_create(session_id)
             # 兼容前端旧字段：
             # - 旧版会传 model（sambert-xxx），新版会传 voice（Cherry/Ethan/...）。
             # - 由于本次切换到 Omni TTS，sambert model 不再用于后端合成，仅保留为兼容存储字段。
@@ -196,7 +305,8 @@ class ConversationController:
         """更新联网开关（前端一次性授权后持久化，并同步到后端会话态）。"""
 
         try:
-            session = self.session_store.get_or_create(sid)
+            session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+            session = self.session_store.get_or_create(session_id)
             enabled = settings.get("networkAccessEnabled")
             if not isinstance(enabled, bool):
                 return {"success": False, "error": "networkAccessEnabled 必须是布尔值"}
@@ -215,7 +325,8 @@ class ConversationController:
         """
 
         try:
-            session = self.session_store.get_or_create(sid)
+            session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+            session = self.session_store.get_or_create(session_id)
 
             enabled = payload.get("deviceLocationEnabled")
             if not isinstance(enabled, bool):
@@ -233,7 +344,7 @@ class ConversationController:
             except Exception:
                 ts_ms = 0
 
-            # 仅作为“授权开关”同步：当 lonLat 未提供时，不报错。
+            # 仅作为"授权开关"同步：当 lonLat 未提供时，不报错。
             # 实际定位将由后端在 get_device_location 工具调用时实时获取。
             if not lon_lat:
                 session.device_location = None
@@ -253,7 +364,8 @@ class ConversationController:
 
     def get_tts_settings(self, sid: str) -> Dict[str, Any]:
         try:
-            session = self.session_store.get_or_create(sid)
+            session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+            session = self.session_store.get_or_create(session_id)
             return {
                 "success": True,
                 "settings": session.tts_settings
@@ -269,13 +381,17 @@ class ConversationController:
             return {"success": False, "error": str(e)}
 
     def get_session_status(self, sid: str) -> Dict[str, Any]:
-        return self.session_store.get_status(sid)
+        session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+        return self.session_store.get_status(session_id)
 
     def get_session_history(self, sid: str, limit: int) -> List[Dict[str, Any]]:
-        return self.session_store.get_history(sid, limit)
+        session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+        return self.session_store.get_history(session_id, limit)
 
     def clear_session(self, sid: str) -> None:
-        self.session_store.clear(sid)
+        session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+        self.session_store.clear(session_id)
+        self._tts_tasks.pop(session_id, None)
 
     def get_stats(self) -> Dict[str, Any]:
         return self.session_store.get_stats()
@@ -462,7 +578,7 @@ class ConversationController:
                 if inner and inner not in {"音乐", "歌曲", "歌"}:
                     return inner
 
-        if t.startswith("“") and t.endswith("”") and len(t) >= 4:
+        if t.startswith(""") and t.endswith(""") and len(t) >= 4:
             inner = t[1:-1].strip()
             if inner and inner not in {"音乐", "歌曲", "歌"}:
                 return inner
@@ -492,7 +608,7 @@ class ConversationController:
         if not t or t in {"音乐", "歌曲", "歌"}:
             return None
 
-        # 识别模式：“歌手的歌名”
+        # 识别模式："歌手的歌名"
         m = re.match(r"^(.{1,10})的(.{1,25})$", t)
         if m:
             artist = m.group(1).strip()
@@ -521,14 +637,14 @@ class ConversationController:
     def _is_music_request(user_text: str) -> bool:
         """判断用户是否在请求播放音乐。
 
-        注意：这里是“后端兜底”的识别逻辑，必须尽量保守，避免越权把对话请求误判成音乐操作。
+        注意：这里是"后端兜底"的识别逻辑，必须尽量保守，避免越权把对话请求误判成音乐操作。
         """
 
         t = str(user_text or "").strip()
         if not t:
             return False
 
-        # 强排除：对话/内容型请求不应触发音乐兜底（哪怕包含“听/讲/说”等字眼）。
+        # 强排除：对话/内容型请求不应触发音乐兜底（哪怕包含"听/讲/说"等字眼）。
         negative = [
             "故事",
             "讲故事",
@@ -554,7 +670,7 @@ class ConversationController:
         if any(x in t for x in negative):
             return False
 
-        # 正向信号：必须出现较明确的“音乐/听歌/点歌/播放一首”类表达。
+        # 正向信号：必须出现较明确的"音乐/听歌/点歌/播放一首"类表达。
         keywords = [
             "听歌",
             "听音乐",
@@ -600,8 +716,8 @@ class ConversationController:
         """判断用户是否在文本中显式指定了地点。
 
         说明：
-        - 该函数只用于“是否应强制使用设备定位”的决策，因此必须偏保守：
-          只要疑似出现了具体地点，就返回 True，避免把“北京天气”误当作当前位置。
+        - 该函数只用于"是否应强制使用设备定位"的决策，因此必须偏保守：
+          只要疑似出现了具体地点，就返回 True，避免把"北京天气"误当作当前位置。
         """
 
         t = str(user_text or "").strip()
@@ -619,7 +735,7 @@ class ConversationController:
             return True
 
         # 3) 典型模式：<疑似地点><天气/温度/预报>
-        # 排除时间词（例如“今天/现在”），避免把“今天天气”误判为地点。
+        # 排除时间词（例如"今天/现在"），避免把"今天天气"误判为地点。
         excluded = {
             "今天",
             "明天",
@@ -667,12 +783,12 @@ class ConversationController:
         return any(k in t for k in keywords)
 
     def _should_prefer_device_location(self, user_text: str) -> bool:
-        """当用户问“天气/定位”但没指定地点时，优先使用设备定位。
+        """当用户问"天气/定位"但没指定地点时，优先使用设备定位。
 
         例如：
-        - “今天天气怎么样？” ✅ 使用设备定位
-        - “我现在的定位是在哪里？” ✅ 使用设备定位
-        - “深圳今天天气怎么样？” ❌ 不强制使用设备定位（由模型按用户指定城市查询）
+        - "今天天气怎么样？" ✅ 使用设备定位
+        - "我现在的定位是在哪里？" ✅ 使用设备定位
+        - "深圳今天天气怎么样？" ❌ 不强制使用设备定位（由模型按用户指定城市查询）
         """
 
         if not (self._is_weather_request(user_text) or self._is_location_request(user_text)):
@@ -707,10 +823,10 @@ class ConversationController:
         llm_resp: Dict[str, Any],
         tool_defs: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """当且仅当 tool_calls 全部属于“联网工具”时，执行工具回填循环。
+        """当且仅当 tool_calls 全部属于"联网工具"时，执行工具回填循环。
 
         说明：
-        - 这样可以避免“工具集合里混入本地执行工具”导致的未回填 tool_call_id 问题。
+        - 这样可以避免"工具集合里混入本地执行工具"导致的未回填 tool_call_id 问题。
         - 只有在用户开启联网开关时，本方法才会被调用。
         """
 
@@ -745,7 +861,7 @@ class ConversationController:
             if not all((self.network_tools_service.is_network_tool(n) or n == "get_device_location") for n in names if n):
                 return current
 
-            # 记录本轮 tool_calls（含解析后的参数），用于定位“location=auto”等问题。
+            # 记录本轮 tool_calls（含解析后的参数），用于定位"location=auto"等问题。
             try:
                 tc_dbg = []
                 for tc in tool_calls[:10]:
@@ -816,7 +932,7 @@ class ConversationController:
                 )
 
                 if not bool(getattr(session, "device_location_enabled", False)):
-                    err = "未开启设备定位，请在设置中开启‘设备定位’并授予系统定位权限。"
+                    err = "未开启设备定位，请在设置中开启'设备定位'并授予系统定位权限。"
                     self.network_tools_service.dump_debug_artifact(
                         request_id=request_id,
                         tag="local_tool_error_get_device_location",
@@ -1044,7 +1160,7 @@ class ConversationController:
                             args_obj["location"] = device_lon_lat
                             override_reason = f"override_location_{raw_loc_s or 'empty'}_to_device_lon_lat"
                         else:
-                            raise RuntimeError("未获取到设备定位，请开启‘设备定位’后重试")
+                            raise RuntimeError("未获取到设备定位，请开启'设备定位'后重试")
 
                 if override_reason:
                     self.network_tools_service.dump_debug_artifact(
@@ -1216,7 +1332,7 @@ class ConversationController:
                     }
                 )
 
-                fb_id, fb_content, _fb_meta = await _exec_one(fallback_call)
+                fb_id, fb_content, _fb_meta = await _exec_network(fallback_call)
                 loop_messages.append(
                     {
                         "role": "tool",
@@ -1225,10 +1341,21 @@ class ConversationController:
                     }
                 )
 
+                loop_messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "你已经拿到了 web_search 工具返回的内容。请直接基于该内容回答用户问题，并给出最终结论。\n"
+                            "要求：INTENT_JSON.actions 必须是空数组，不要再发起任何工具调用；SAY 必须给出完整答案。"
+                        ),
+                    }
+                )
+
+                # 兜底总结阶段必须禁用 tools，避免模型再次生成 web_search。
                 current = await self.llm_service.invoke_llm(
                     loop_messages,
-                    tools=tool_defs,
-                    parallel_tool_calls=True,
+                    tools=[],
+                    parallel_tool_calls=False,
                 )
                 return current
 
@@ -1241,12 +1368,18 @@ class ConversationController:
         return current
 
     async def handle_text_command(self, *, sid: str, text: Any, request_id: Optional[str]) -> None:
-        effective_request_id = request_id.strip() if isinstance(request_id, str) and request_id.strip() else self._gen_request_id(sid)
+        session_id, emit_to = self._resolve_session_and_emit_to(sid)
 
-        session = self.session_store.get_or_create(sid)
+        effective_request_id = (
+            request_id.strip()
+            if isinstance(request_id, str) and request_id.strip()
+            else self._gen_request_id(session_id)
+        )
+
+        session = self.session_store.get_or_create(session_id)
         session.current_request_id = effective_request_id
 
-        self.reset_tts_stop(sid)
+        self.reset_tts_stop(session_id)
 
         user_text = str(text or "").strip()
         if not user_text:
@@ -1257,13 +1390,18 @@ class ConversationController:
                     "content": "请输入文本",
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
-                to=sid,
+                to=emit_to,
             )
             return
 
-        self.session_store.add_message(sid, msg_type="user", content=user_text, metadata={"requestId": effective_request_id})
+        self.session_store.add_message(
+            session_id,
+            msg_type="user",
+            content=user_text,
+            metadata={"requestId": effective_request_id},
+        )
 
-        history = self.session_store.get_history(sid, 10)
+        history = self.session_store.get_history(session_id, 10)
         messages = [
             {"role": "user" if m["type"] == "user" else "assistant", "content": m["content"]}
             for m in history
@@ -1273,7 +1411,7 @@ class ConversationController:
         include_network = bool(session.network_access_enabled)
         include_device_location = bool(getattr(session, "device_location_enabled", False)) and self.device_location_service.is_available()
 
-        # 记录本次“设备定位工具是否可用/是否已授权开启”，便于排障。
+        # 记录本次"设备定位工具是否可用/是否已授权开启"，便于排障。
         try:
             self.network_tools_service.dump_debug_artifact(
                 request_id=effective_request_id,
@@ -1293,14 +1431,18 @@ class ConversationController:
             include_device_location=include_device_location,
         )
 
+        # 注入长期记忆上下文（user_profile + rolling_summary）
+        memory_context = self.memory_service.build_memory_context()
+
         llm_resp = await self.llm_service.invoke_llm(
             messages,
             tools=tool_defs,
             parallel_tool_calls=include_network,
+            memory_context=memory_context,
         )
 
-        # 兼容：模型可能把“工具调用意图”写在 INTENT_JSON.actions 中，而不是 tool_calls。
-        # 对于 get_device_location 与联网工具，我们必须走 tool-loop 回填，再让模型总结输出，避免被 SafetyService 当作“未知工具”拦截。
+        # 兼容：模型可能把"工具调用意图"写在 INTENT_JSON.actions 中，而不是 tool_calls。
+        # 对于 get_device_location 与联网工具，我们必须走 tool-loop 回填，再让模型总结输出，避免被 SafetyService 当作"未知工具"拦截。
         if (include_network or include_device_location) and not (
             llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
         ):
@@ -1312,7 +1454,7 @@ class ConversationController:
                 self.network_tools_service.is_network_tool(name) or name == "get_device_location"
                 for name in synthesized_names
             ):
-                # 记录本轮“从 INTENT_JSON.actions 合成”的 tool_calls（否则后续 llm_resp 可能不带 toolCalls）。
+                # 记录本轮"从 INTENT_JSON.actions 合成"的 tool_calls（否则后续 llm_resp 可能不带 toolCalls）。
                 try:
                     tc_dbg = []
                     for tc in synthesized[:10]:
@@ -1350,7 +1492,7 @@ class ConversationController:
                 tool_defs=tool_defs,
             )
 
-        # 记录“本次模型/工具最终是否使用了 IP 定位/使用了哪个 location 参数”，便于复盘。
+        # 记录"本次模型/工具最终是否使用了 IP 定位/使用了哪个 location 参数"，便于复盘。
         try:
             tool_calls_raw_dbg = llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
             tc_dbg = []
@@ -1381,7 +1523,7 @@ class ConversationController:
         response_text = self._sanitize_say_text(parsed.get("sayText") or "")
 
         tool_calls_raw = llm_resp.get("toolCalls") if isinstance(llm_resp.get("toolCalls"), list) else []
-        # 重要：联网工具与 get_device_location 必须走“工具回填循环”，不能走 ToolRouter。
+        # 重要：联网工具与 get_device_location 必须走"工具回填循环"，不能走 ToolRouter。
         tool_calls = [
             tc
             for tc in tool_calls_raw
@@ -1399,7 +1541,7 @@ class ConversationController:
             (self._tool_name_from_call(tc) or "") == "get_device_location" for tc in selected_tool_calls
         ):
             if not include_device_location:
-                response_text = "未开启设备定位，请在设置中开启‘设备定位’并授予系统定位权限。"
+                response_text = "未开启设备定位，请在设置中开启'设备定位'并授予系统定位权限。"
                 selected_tool_calls = []
                 intent = {"mode": "ask", "confidence": 0.9, "actions": [], "reason": "device_location_disabled"}
 
@@ -1420,12 +1562,12 @@ class ConversationController:
         fallback_applied = False
         fallback_reason = None
 
-        # 兜底：当模型未输出动作时，避免出现“口头说在播放但其实没执行”的假播放。
-        # 注意：后端不实现“随机选歌库”；随机化应由 LLM 生成真实的 query。
+        # 兜底：当模型未输出动作时，避免出现"口头说在播放但其实没执行"的假播放。
+        # 注意：后端不实现"随机选歌库"；随机化应由 LLM 生成真实的 query。
         if not selected_tool_calls and self._is_music_request(user_text):
             q = self._extract_music_search_query(user_text)
             if q:
-                response_text = f"我可以用酷狗搜索并播放“{q}”。这需要你确认一下。"
+                response_text = f"我可以用酷狗搜索并播放\u201c{q}\u201d。这需要你确认一下。"
                 selected_tool_calls = [
                     self._make_tool_call(
                         "music_ui",
@@ -1471,7 +1613,7 @@ class ConversationController:
                 src = str(args_obj.get("source") or "").strip().lower()
                 q_from_model = str(args_obj.get("query") or "").strip()
                 if src in {"", "kugou"} and q_from_model:
-                    response_text = f"我可以用酷狗搜索并播放“{q_from_model}”。这需要你确认一下。"
+                    response_text = f"我可以用酷狗搜索并播放\u201c{q_from_model}\u201d。这需要你确认一下。"
                     selected_tool_calls = [
                         self._make_tool_call(
                             "music_ui",
@@ -1482,11 +1624,11 @@ class ConversationController:
                     intent = self.merge_intent_with_tool_calls(intent, selected_tool_calls)
                     forced_reason = "force_music_ui_for_song_query_from_model"
 
-            # “我喜欢第一首”：用户明确要求播放我喜欢里的第一首
+            # "我喜欢第一首"：用户明确要求播放我喜欢里的第一首
             if forced_reason is None:
                 t = str(user_text or "")
                 if ("我喜欢" in t or "喜欢的歌" in t or "我喜爱" in t) and ("第一首" in t or "第一首歌" in t):
-                    response_text = "我可以在酷狗打开“我喜欢”并播放第一首。这需要你确认一下。"
+                    response_text = "我可以在酷狗打开\u201c我喜欢\u201d并播放第一首。这需要你确认一下。"
                     selected_tool_calls = [
                         self._make_tool_call(
                             "music_ui",
@@ -1507,15 +1649,15 @@ class ConversationController:
             fallback_applied = True
             fallback_reason = forced_reason
 
-        # 若仍无动作，确保不会声称“正在播放/已开始播放”。
+        # 若仍无动作，确保不会声称"正在播放/已开始播放"。
         if not selected_tool_calls and self._looks_like_playback_claim(response_text):
-            response_text = "我还没开始播放。你想听什么歌？或者直接说“播放音乐”。"
+            response_text = "我还没开始播放。你想听什么歌？或者直接说\u201c播放音乐\u201d。"
 
         if not response_text.strip() and (intent or {}).get("actions"):
             response_text = "好呀，我来处理。"
 
         self.session_store.add_message(
-            sid,
+            session_id,
             msg_type="assistant",
             content=response_text,
             metadata={
@@ -1525,6 +1667,14 @@ class ConversationController:
                 "usage": llm_resp.get("usage"),
                 "fallback": {"applied": fallback_applied, "reason": fallback_reason},
             },
+        )
+
+        # 异步触发长期记忆更新（摘要 + 偏好抽取），不阻塞主链路
+        asyncio.create_task(
+            self._update_memory_after_turn(
+                user_text=user_text,
+                assistant_text=response_text,
+            )
         )
 
         if response_text.strip():
@@ -1537,11 +1687,11 @@ class ConversationController:
                     "metadata": {"intent": intent},
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
-                to=sid,
+                to=emit_to,
             )
 
         if selected_tool_calls:
-            await self.handle_tool_calls(sid=sid, tool_calls=selected_tool_calls)
+            await self.handle_tool_calls(sid=emit_to, tool_calls=selected_tool_calls)
             return
 
         # TTS 流式输出
@@ -1552,7 +1702,7 @@ class ConversationController:
         async def _run_tts() -> None:
             try:
                 async def on_chunk(wav_bytes: bytes) -> None:
-                    if self.is_tts_stopped(sid):
+                    if self.is_tts_stopped(session_id):
                         cancel_event.set()
                         return
                     if wav_bytes:
@@ -1564,7 +1714,7 @@ class ConversationController:
                                 "requestId": effective_request_id,
                                 "isComplete": False,
                             },
-                            to=sid,
+                            to=emit_to,
                         )
 
                 audio_full = await self.tts_service.text_to_speech(
@@ -1584,7 +1734,7 @@ class ConversationController:
                         "requestId": effective_request_id,
                         "isComplete": True,
                     },
-                    to=sid,
+                    to=emit_to,
                 )
 
                 if not audio_full:
@@ -1596,7 +1746,7 @@ class ConversationController:
                             "requestId": effective_request_id,
                             "settings": voice_settings,
                         },
-                        to=sid,
+                        to=emit_to,
                     )
 
             except asyncio.CancelledError:
@@ -1609,7 +1759,7 @@ class ConversationController:
                         "requestId": effective_request_id,
                         "isComplete": True,
                     },
-                    to=sid,
+                    to=emit_to,
                 )
             except Exception:
                 await self.sio.emit(
@@ -1620,13 +1770,61 @@ class ConversationController:
                         "requestId": effective_request_id,
                         "settings": voice_settings,
                     },
-                    to=sid,
+                    to=emit_to,
                 )
 
         task = asyncio.create_task(_run_tts())
-        self._tts_tasks[sid] = task
+        self._tts_tasks[session_id] = task
+
+    async def _update_memory_after_turn(
+        self,
+        *,
+        user_text: str,
+        assistant_text: str,
+    ) -> None:
+        """每轮对话后异步更新长期记忆（滚动摘要 + 偏好抽取）。
+
+        不阻塞主链路，失败时仅记录警告。
+        """
+        if not self.memory_service.enabled:
+            return
+
+        latest_messages = [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_text},
+        ]
+
+        # 1) 更新滚动摘要
+        try:
+            summary_msgs = self.memory_service.build_summary_update_messages(latest_messages)
+            summary_resp = await self.llm_service.invoke_llm(
+                summary_msgs,
+                max_tokens=600,
+            )
+            new_summary = str(summary_resp.get("text") or "").strip()
+            if new_summary:
+                self.memory_service.save_rolling_summary(new_summary)
+                logger.debug("滚动摘要已更新 (%d 字符)", len(new_summary))
+        except Exception as e:
+            logger.warning("滚动摘要更新失败: %s", e)
+
+        # 2) 偏好抽取（仅在用户消息包含触发词时）
+        if self.memory_service.should_extract_preferences(user_text):
+            try:
+                pref_msgs = self.memory_service.build_preference_extract_messages(user_text)
+                pref_resp = await self.llm_service.invoke_llm(
+                    pref_msgs,
+                    max_tokens=400,
+                )
+                pref_text = str(pref_resp.get("text") or "").strip()
+                if pref_text:
+                    self.memory_service.parse_and_save_profile(pref_text)
+            except Exception as e:
+                logger.warning("偏好抽取失败: %s", e)
 
     async def handle_tool_calls(self, *, sid: str, tool_calls: List[Dict[str, Any]]) -> None:
+        session_id, emit_to = self._resolve_session_and_emit_to(sid)
+
         # 与 Node 侧对齐：只处理前几条 tool call。
         for tc in tool_calls[:3]:
             fn = tc.get("function") or {}
@@ -1641,12 +1839,12 @@ class ConversationController:
 
             parsed_tool_call = {"id": tc.get("id"), "name": name, "arguments": args}
 
-            session = self.session_store.get_or_create(sid)
-            allow_local = self.is_local_control_allowed(sid)
+            session = self.session_store.get_or_create(session_id)
+            allow_local = self.is_local_control_allowed(session_id)
 
             # 防御性兜底：联网工具不应走 ToolRouter/SafetyService；它们必须在 handle_text_command 的 tool-loop 中执行并回填。
             if self.network_tools_service.is_network_tool(str(name or "").strip()):
-                msg = "联网查询未开启，请在设置里打开“允许联网查询”后再试。"
+                msg = "联网查询未开启，请在设置里打开\u201c允许联网查询\u201d后再试。"
                 if session.network_access_enabled:
                     msg = "联网查询已开启，但本次请求未走联网工具回填链路。请重试该问题。"
                 await self.sio.emit(
@@ -1657,7 +1855,7 @@ class ConversationController:
                         "toolCall": parsed_tool_call,
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     },
-                    to=sid,
+                    to=emit_to,
                 )
                 continue
 
@@ -1671,42 +1869,51 @@ class ConversationController:
                         "toolCall": parsed_tool_call,
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     },
-                    to=sid,
+                    to=emit_to,
                 )
                 continue
 
             # 需要确认
             if risk.requires_confirmation:
                 confirmation = self.safety_service.generate_confirmation_request(parsed_tool_call, risk)
-                self.session_store.set_pending_confirmation(sid, confirmation)
-                self.session_store.set_pending_tool_call(sid, parsed_tool_call, {
-                    "riskLevel": risk.risk_level,
-                    "requiresConfirmation": True,
-                    "reason": risk.reason,
-                })
+                self.session_store.set_pending_confirmation(session_id, confirmation)
+                self.session_store.set_pending_tool_call(
+                    session_id,
+                    parsed_tool_call,
+                    {
+                        "riskLevel": risk.risk_level,
+                        "requiresConfirmation": True,
+                        "reason": risk.reason,
+                    },
+                )
 
-                await self.sio.emit("request-confirmation", confirmation, to=sid)
+                await self.sio.emit("request-confirmation", confirmation, to=emit_to)
                 return
 
-            await self.execute_tool_call(sid=sid, tool_call=parsed_tool_call)
+            await self.execute_tool_call(sid=emit_to, tool_call=parsed_tool_call)
 
     async def execute_tool_call(self, *, sid: str, tool_call: Dict[str, Any]) -> None:
+        session_id, emit_to = self._resolve_session_and_emit_to(sid)
+
         self.session_store.add_message(
-            sid,
+            session_id,
             msg_type="tool_call",
             content=f"调用工具: {tool_call.get('name')}",
             metadata={"toolCall": tool_call},
         )
 
-        session = self.session_store.get_or_create(sid)
-        result = await self.tool_router.route_and_execute(tool_call, {
-            "socketId": sid,
-            "session": session,
-            "allowLocalControl": self.is_local_control_allowed(sid),
-        })
+        session = self.session_store.get_or_create(session_id)
+        result = await self.tool_router.route_and_execute(
+            tool_call,
+            {
+                "socketId": emit_to,
+                "session": session,
+                "allowLocalControl": self.is_local_control_allowed(session_id),
+            },
+        )
 
         self.session_store.add_message(
-            sid,
+            session_id,
             msg_type="tool_result",
             content=(result.get("result") or {}).get("message") if result.get("success") else result.get("error", ""),
             metadata={"result": result},
@@ -1721,7 +1928,7 @@ class ConversationController:
                 "error": None if result.get("success") else result.get("error"),
                 "timestamp": result.get("timestamp"),
             },
-            to=sid,
+            to=emit_to,
         )
 
         # 工具执行结果的语音反馈
@@ -1737,33 +1944,35 @@ class ConversationController:
                     "requestId": session.current_request_id,
                     "settings": voice_settings,
                 },
-                to=sid,
+                to=emit_to,
             )
 
     async def handle_confirmation(self, *, sid: str, confirmation_id: Any, approved: Any) -> None:
-        pending = self.session_store.get_pending_confirmation(sid)
+        session_id, emit_to = self._resolve_session_and_emit_to(sid)
+
+        pending = self.session_store.get_pending_confirmation(session_id)
         if not pending or pending.get("id") != confirmation_id:
             await self.sio.emit(
                 "error",
                 {"message": "确认请求不存在或已过期"},
-                to=sid,
+                to=emit_to,
             )
             return
 
-        pending_tool_call = self.session_store.get_or_create(sid).pending_tool_call
-        self.session_store.clear_pending_confirmation(sid)
+        pending_tool_call = self.session_store.get_or_create(session_id).pending_tool_call
+        self.session_store.clear_pending_confirmation(session_id)
 
         if not pending_tool_call:
-            await self.sio.emit("error", {"message": "待处理的工具调用不存在"}, to=sid)
+            await self.sio.emit("error", {"message": "待处理的工具调用不存在"}, to=emit_to)
             return
 
         if bool(approved) is True:
-            self.session_store.clear_pending_tool_call(sid)
-            await self.execute_tool_call(sid=sid, tool_call=pending_tool_call)
+            self.session_store.clear_pending_tool_call(session_id)
+            await self.execute_tool_call(sid=emit_to, tool_call=pending_tool_call)
             return
 
         # 用户拒绝
-        self.session_store.clear_pending_tool_call(sid)
+        self.session_store.clear_pending_tool_call(session_id)
         await self.sio.emit(
             "assistant-message",
             {
@@ -1771,15 +1980,17 @@ class ConversationController:
                 "content": "好的，那我不执行这个操作。",
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             },
-            to=sid,
+            to=emit_to,
         )
 
     async def handle_cancel(self, *, sid: str, silent: bool) -> None:
+        session_id, emit_to = self._resolve_session_and_emit_to(sid)
+
         # 取消待确认/待执行工具，并停止 TTS
-        self.stop_tts(sid)
-        self.session_store.clear_pending_confirmation(sid)
-        self.session_store.clear_pending_tool_call(sid)
-        self.session_store.mark_canceled(sid)
+        self.stop_tts(session_id)
+        self.session_store.clear_pending_confirmation(session_id)
+        self.session_store.clear_pending_tool_call(session_id)
+        self.session_store.mark_canceled(session_id)
 
         if not silent:
             await self.sio.emit(
@@ -1789,11 +2000,13 @@ class ConversationController:
                     "content": "当前操作已取消。",
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
-                to=sid,
+                to=emit_to,
             )
 
     async def handle_stop_music(self, *, sid: str) -> None:
-        if not self.is_local_control_allowed(sid):
+        session_id, emit_to = self._resolve_session_and_emit_to(sid)
+
+        if not self.is_local_control_allowed(session_id):
             await self.sio.emit(
                 "assistant-message",
                 {
@@ -1801,11 +2014,14 @@ class ConversationController:
                     "content": "本地应用操控已禁用，已忽略停止音乐请求",
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
-                to=sid,
+                to=emit_to,
             )
             return
 
-        result = await self.tool_router.route_and_execute({"id": f"stop_music_{int(time.time()*1000)}", "name": "stop_music", "arguments": {}}, {"socketId": sid})
+        result = await self.tool_router.route_and_execute(
+            {"id": f"stop_music_{int(time.time()*1000)}", "name": "stop_music", "arguments": {}},
+            {"socketId": emit_to},
+        )
         msg = (result.get("result") or {}).get("message") or "音乐已停止"
         await self.sio.emit(
             "assistant-message",
@@ -1814,5 +2030,5 @@ class ConversationController:
                 "content": msg,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             },
-            to=sid,
+            to=emit_to,
         )

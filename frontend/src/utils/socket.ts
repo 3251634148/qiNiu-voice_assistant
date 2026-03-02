@@ -6,6 +6,38 @@ class SocketService {
   private serverUrl: string;
   private isConnecting: boolean = false;
   private connectionPromise: Promise<void> | null = null;
+  private clientId: string | null = null;
+
+  private getOrCreateClientId(): string {
+    if (this.clientId) {
+      return this.clientId;
+    }
+
+    const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+    const isElectron = ua.toLowerCase().includes("electron");
+    if (isElectron) {
+      this.clientId = "desktop";
+      return this.clientId;
+    }
+
+    const storageKey = "voice_assistant_client_id";
+    try {
+      const existing = window.localStorage.getItem(storageKey);
+      if (existing && existing.trim()) {
+        this.clientId = existing.trim();
+        return this.clientId;
+      }
+
+      const generated = `web_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+      window.localStorage.setItem(storageKey, generated);
+      this.clientId = generated;
+      return this.clientId;
+    } catch {
+      const fallback = `web_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+      this.clientId = fallback;
+      return this.clientId;
+    }
+  }
 
   constructor(serverUrl: string = "http://localhost:3002") {
     this.serverUrl = serverUrl;
@@ -34,17 +66,21 @@ class SocketService {
     this.isConnecting = true;
 
     this.connectionPromise = new Promise((resolve, reject) => {
-      this.socket = io(this.serverUrl, {
+        this.socket = io(this.serverUrl, {
         reconnection: true,
         reconnectionAttempts: Infinity, // 无限重连
         reconnectionDelay: 1000, // 重连延迟1秒
         reconnectionDelayMax: 5000, // 最大重连延迟5秒
         timeout: 20000, // 连接超时时间20秒
-        transports: ["websocket", "polling"], // 支持多种传输方式
+        transports: ["websocket"], // 强制 websocket，避免 polling/upgrade 触发多次连接
       });
 
       this.socket.on("connect", () => {
         console.log("已连接到服务器");
+
+        const clientId = this.getOrCreateClientId();
+        this.socket?.emit("register-client", { clientId });
+
         this.isConnecting = false;
         resolve();
       });
@@ -62,6 +98,10 @@ class SocketService {
           // 服务器主动断开，需要手动重连
           this.socket?.connect();
         }
+      });
+
+      this.socket.on("client-registered", (payload) => {
+        console.log("client-registered:", payload);
       });
 
       this.socket.on("reconnect_attempt", (attemptNumber) => {

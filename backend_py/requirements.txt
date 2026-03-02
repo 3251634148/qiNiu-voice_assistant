@@ -17,3 +17,8 @@ pyobjc-framework-Cocoa==12.1
 pyobjc-framework-Quartz==12.1
 pyobjc-framework-Vision==12.1
 pyobjc-framework-CoreLocation==12.1
+
+# 全局热键监听 + 麦克风录音（模块1：热键唤醒语音接收）
+pynput>=1.7.6
+sounddevice>=0.5.0
+numpy>=1.24.0

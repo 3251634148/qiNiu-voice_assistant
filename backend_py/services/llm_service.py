@@ -16,16 +16,29 @@ logger = logging.getLogger("backend_py.llm")
 
 
 class LLMService:
-    """千问（DashScope）OpenAI 兼容模式调用封装。"""
+    """LLM 调用封装，支持 DashScope（远程）和 Ollama（本地）两种后端。
+
+    通过环境变量 LLM_PROVIDER 切换：
+    - dashscope（默认）：阿里云千问 OpenAI 兼容模式
+    - ollama：本地 Ollama（OpenAI 兼容 API，http://localhost:11434/v1）
+    """
 
     def __init__(self) -> None:
         self.stub_enabled = str(os.getenv("VOICE_ASSISTANT_LLM_STUB", "")).strip().lower() in {"1", "true", "yes"}
+        self.provider = settings.llm_provider  # "dashscope" or "ollama"
 
-        if not self.stub_enabled and not settings.dashscope_api_key:
-            raise RuntimeError("千问API密钥未配置，请设置DASHSCOPE_API_KEY环境变量")
-
-        self.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        self.model_default = "qwen-plus"
+        if self.provider == "ollama":
+            self.base_url = settings.ollama_base_url
+            self.api_key = "ollama"  # Ollama 不需要真实 key，但 HTTP 头需要非空值
+            self.model_default = settings.ollama_model
+            logger.info("LLM 后端: Ollama (base_url=%s, model=%s)", self.base_url, self.model_default)
+        else:
+            if not self.stub_enabled and not settings.dashscope_api_key:
+                raise RuntimeError("千问API密钥未配置，请设置DASHSCOPE_API_KEY环境变量")
+            self.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            self.api_key = settings.dashscope_api_key
+            self.model_default = "qwen-plus"
+            logger.info("LLM 后端: DashScope (model=%s)", self.model_default)
         self.network_tools = NetworkToolsService()
 
         # 本地设备定位工具（macOS CoreLocation），由会话开关决定是否对模型暴露。
@@ -498,26 +511,43 @@ class LLMService:
         tools: Optional[List[Dict[str, Any]]] = None,
         max_tokens: int = 512,
         parallel_tool_calls: bool = False,
+        memory_context: str = "",
     ) -> Dict[str, Any]:
         if self.stub_enabled:
             return self._invoke_llm_stub(messages)
 
         used_model = model or self.model_default
-        tool_defs = tools or self.function_definitions
+        # tools=None 表示使用默认工具；tools=[] 表示显式禁用工具（例如让模型只总结工具结果）。
+        tool_defs = self.function_definitions if tools is None else tools
+
+        # 构建 system prompt：基础规则 + 记忆上下文（user_profile + rolling_summary）
+        sys_content = self.system_prompt
+        if memory_context:
+            sys_content = f"{self.system_prompt}\n\n{memory_context}"
 
         payload: Dict[str, Any] = {
             "model": used_model,
-            "messages": [{"role": "system", "content": self.system_prompt}, *messages],
+            "messages": [{"role": "system", "content": sys_content}, *messages],
             "temperature": 0.7,
             "max_tokens": max_tokens,
-            "tools": [{"type": "function", "function": t} for t in tool_defs],
-            "tool_choice": "auto",
         }
-        if parallel_tool_calls:
-            payload["parallel_tool_calls"] = True
+
+        # Ollama 本地模型可能不支持 tools / tool_choice，按需传入
+        if self.provider != "ollama":
+            payload["tools"] = [{"type": "function", "function": t} for t in tool_defs]
+            payload["tool_choice"] = "auto"
+            if parallel_tool_calls:
+                payload["parallel_tool_calls"] = True
+        else:
+            # Ollama 的 OpenAI 兼容模式部分支持 tools（取决于模型能力），尝试传入
+            try:
+                payload["tools"] = [{"type": "function", "function": t} for t in tool_defs]
+                payload["tool_choice"] = "auto"
+            except Exception:
+                pass
 
         headers = {
-            "Authorization": f"Bearer {settings.dashscope_api_key}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
