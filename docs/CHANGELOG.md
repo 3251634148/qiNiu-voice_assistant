@@ -118,8 +118,8 @@
 
 ### 🔧 问题修复
 - **修复前端无法连接服务器（"正在连接服务器"）**：
-  - **根因**：CodeBuddy（IDE）进程占用了 `localhost:3001` 端口，拦截所有 HTTP/WS 请求并返回 `426 Upgrade Required`，导致前端 Socket.IO 永远无法与 Python 后端建立连接。
-  - **修复**：将前后端通信端口从 `3001` 统一改为 `3002`（前端 `socket.ts`、Python `config.py`、Node `server.js`、`package.json`、`start.sh`）。
+  - **根因**：CodeBuddy（IDE）进程占用了 `localhost:3002` 端口，拦截所有 HTTP/WS 请求并返回 `426 Upgrade Required`，导致前端 Socket.IO 永远无法与 Python 后端建立连接。
+  - **修复**：将前后端通信端口从 `3002` 统一改为 `3002`（前端 `socket.ts`、Python `config.py`、Node `server.js`、`package.json`、`start.sh`）。
 - **修复抖音搜索框 fallback 点击 y 偏移问题**：
   - **根因**：`_fallback_click_point` 中 y 系数为 `0.55`，导致 `y_norm=0.066`（image_y≈106），实际搜索框中心在 `y_norm≈0.03`（image_y≈48），点击落在搜索框下方。
   - **修复**：将 y 系数从 `0.55` 降为 `0.25`，使 `y_norm = 0.00 + 0.12 × 0.25 = 0.03`，精准命中搜索框中心。
@@ -141,11 +141,11 @@
 |------|----------|
 | `backend_py/services/wecom_ui_controller.py` | 修正 `chat_header` ROI 默认值；拆分 `_search_contact_and_send_inner`，异常路径兜底落盘 JSON |
 | `backend_py/services/douyin_controller.py` | 修复 `_fallback_click_point` y 系数 0.55→0.25，修正搜索框点击偏移 |
-| `frontend/src/utils/socket.ts` | Socket.IO 连接端口 3001→3002 |
-| `backend_py/config.py` | 默认端口 3001→3002 |
-| `backend/server.js` | 默认端口 3001→3002 |
-| `package.json` | `dev:backend_py` 脚本端口 3001→3002 |
-| `start.sh` | 端口提示与 .env 模板 3001→3002 |
+| `frontend/src/utils/socket.ts` | Socket.IO 连接端口 3002→3002 |
+| `backend_py/config.py` | 默认端口 3002→3002 |
+| `backend/server.js` | 默认端口 3002→3002 |
+| `package.json` | `dev:backend_py` 脚本端口 3002→3002 |
+| `start.sh` | 端口提示与 .env 模板 3002→3002 |
 | `test_scripts/debug_wecom_search_send_flow.py` | 文档示例联系人从"顾老师"改为"罗晨曦" |
 | `test_scripts/debug_wecom_header_ocr_roi.py` | 新增：离线 OCR 对照实验 v1 |
 | `test_scripts/debug_wecom_header_ocr_roi_v2.py` | 新增：离线 OCR 对照实验 v2 |

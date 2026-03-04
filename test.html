@@ -102,7 +102,7 @@
         }
 
         function connect() {
-            socket = io('http://localhost:3001');
+            socket = io('http://localhost:3002');
             
             socket.on('connect', () => {
                 document.getElementById('status').textContent = '已连接';

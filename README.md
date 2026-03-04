@@ -36,7 +36,7 @@ npm run dev
 ```bash
 # 建议 Python 3.11
 source backend_py/.venv/bin/activate
-uvicorn backend_py.main:asgi_app --host 0.0.0.0 --port 3001
+uvicorn backend_py.main:asgi_app --host 0.0.0.0 --port 3002
 ```
 
 ### 环境变量配置
@@ -46,7 +46,7 @@ uvicorn backend_py.main:asgi_app --host 0.0.0.0 --port 3001
 ```env
 # 基础配置
 NODE_ENV=development
-PORT=3001
+PORT=3002
 
 # DashScope（千问）：LLM/TTS/ASR（Python 后端与部分 Node 路径会用到）
 DASHSCOPE_API_KEY=your_dashscope_api_key_here

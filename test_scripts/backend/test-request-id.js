@@ -19,7 +19,7 @@ function generateRequestId(prefix) {
 }
 
 async function main() {
-  const serverUrl = process.env.VOICE_ASSISTANT_SERVER_URL || "http://localhost:3001";
+  const serverUrl = process.env.VOICE_ASSISTANT_SERVER_URL || "http://localhost:3002";
 
   const req1 = generateRequestId("req1");
   const req2 = generateRequestId("req2");
