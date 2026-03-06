@@ -1,3 +1,22 @@
+## 2026-03-04（根因修复 — 设备定位开关不生效 / tool-loop 读错会话 / 热键链路一致性）
+
+### 🔧 问题修复
+
+- **修复设备定位开关“已开启但实际执行层仍判定未开启”的根因问题**：
+  - **根因 1（会话迁移丢失会话态）**：启用 `register-client` 绑定 `sid → clientId` 后，`SessionStore.migrate(from_id=sid, to_id=clientId)` 在 `to_id` 已存在时历史逻辑会丢弃 `sid` 会话，导致刚同步到 `sid` 的 `device_location_enabled/network_access_enabled/tts_settings` 等被丢弃（典型竞态：update 先到 sid、register-client 后到触发 migrate）。
+  - **根因 2（tool-loop 读错会话）**：`handle_text_command()` 已解析 `session_id=clientId` 并用于 capability，但调用 `_maybe_run_network_tool_loop()` 仍传入原始 `sid`，导致 tool-loop 内 `session_store.get_or_create(sid)` 创建了默认关闭的新会话，从而出现“capability 显示 enabled=true，但 local_tool_request 里 enabled=false”的矛盾。
+  - **修复**：
+    - `SessionStore.migrate()` 改为“目标会话已存在时合并会话态”而非直接丢弃，并引入布尔开关的“显式设置时间戳”合并策略（开启/关闭都能正确传播）。
+    - tool-loop 统一使用解析后的 `session_id` 读取会话态（不再使用 raw `sid`）。
+    - 天气工具 `location=""` 等占位符增强：可触发一次自动设备定位；在缺少定位时不再抛未捕获异常，改为返回工具失败结构，避免 `asyncio.Task exception was never retrieved`。
+  - **回归测试**：新增回归用例覆盖会话迁移合并与 tool-loop session_id 读取、`location=""` 占位符场景等。
+
+### 🧪 测试
+
+- 新增：
+  - `test_scripts/test_session_store_migrate_merge_settings.py`
+  - `test_scripts/test_device_location_tool_loop_regression.py`
+
 ## 2026-03-02（新功能迭代 — LLM 配置化 / 长期记忆 / 热键唤醒 / ESP32 对接）
 
 ### 🔧 问题修复

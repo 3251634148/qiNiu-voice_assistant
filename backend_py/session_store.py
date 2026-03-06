@@ -21,7 +21,11 @@ class Session:
     tts_settings: Dict[str, Any] = field(default_factory=dict)
     allow_local_control: Optional[bool] = None
     network_access_enabled: bool = False
+    # 最近一次“显式设置联网开关”的时间戳（ms）。用于 sid->clientId 迁移合并时判定新旧优先级。
+    network_access_set_at_ms: int = 0
     device_location_enabled: bool = False
+    # 最近一次“显式设置设备定位开关”的时间戳（ms）。用于 sid->clientId 迁移合并时判定新旧优先级。
+    device_location_set_at_ms: int = 0
     device_location: Optional[Dict[str, Any]] = None
     tts_stopped: bool = False
     current_request_id: Optional[str] = None
@@ -35,6 +39,77 @@ class SessionStore:
         self.session_timeout = timedelta(hours=2)
         self.confirmation_timeout = timedelta(minutes=5)
 
+    @staticmethod
+    def _merge_session_state(*, dst: Session, src: Session) -> None:
+        """将 src 的“会话态”合并进 dst（最小化覆盖）。
+
+        设计原则（用于修复 sid->clientId 迁移的时序竞争）：
+        - 不再在 dst 已存在时直接丢弃 src（会导致开关/音色等丢失）
+        - 只合并“稳定配置/权限/历史”等字段，避免覆盖高风险的 pending 状态
+        - 对布尔开关采用“显式设置时间戳优先”（既能保留开启，也能正确传播关闭）
+        - 对 Optional 字段采用“dst 缺省时用 src”（防止误覆盖已有配置）
+        """
+
+        # 1) 权限/开关：按“最近一次显式设置”的时间戳合并（支持开启与关闭都能正确传播）。
+        dst_net_ts = int(getattr(dst, "network_access_set_at_ms", 0) or 0)
+        src_net_ts = int(getattr(src, "network_access_set_at_ms", 0) or 0)
+        if src_net_ts > dst_net_ts:
+            dst.network_access_enabled = bool(src.network_access_enabled)
+            dst.network_access_set_at_ms = src_net_ts
+
+        dst_loc_ts = int(getattr(dst, "device_location_set_at_ms", 0) or 0)
+        src_loc_ts = int(getattr(src, "device_location_set_at_ms", 0) or 0)
+        if src_loc_ts > dst_loc_ts:
+            dst.device_location_enabled = bool(src.device_location_enabled)
+            dst.device_location_set_at_ms = src_loc_ts
+
+        # 2) 设备定位缓存（仅当 dst 缺失时使用 src）
+        if dst.device_location is None and isinstance(src.device_location, dict):
+            dst.device_location = src.device_location
+        # 若 src 的设备定位“显式设置”更新更晚，则允许覆盖（例如用户关闭定位时需要清空缓存）
+        if src_loc_ts > dst_loc_ts:
+            dst.device_location = src.device_location if isinstance(src.device_location, dict) else None
+
+        # 3) allow_local_control（仅当 dst 未显式设置时使用 src）
+        if dst.allow_local_control is None and isinstance(src.allow_local_control, bool):
+            dst.allow_local_control = src.allow_local_control
+
+        # 4) tts_settings（对缺失键做补齐，不覆盖已有键）
+        if isinstance(src.tts_settings, dict) and src.tts_settings:
+            if not isinstance(dst.tts_settings, dict):
+                dst.tts_settings = {}
+            for k, v in src.tts_settings.items():
+                if k not in dst.tts_settings:
+                    dst.tts_settings[k] = v
+                    continue
+
+                existing = dst.tts_settings.get(k)
+                is_empty_dict = isinstance(existing, dict) and (not existing)
+                if existing is None or existing == "" or is_empty_dict:
+                    dst.tts_settings[k] = v
+
+        # 5) history（合并并截断到最后 100 条）
+        if isinstance(src.history, list) and src.history:
+            if not isinstance(dst.history, list):
+                dst.history = []
+            dst.history.extend([x for x in src.history if isinstance(x, dict)])
+            if len(dst.history) > 100:
+                dst.history = dst.history[-100:]
+
+        # 6) requestId（仅当 dst 缺失时使用 src）
+        if (dst.current_request_id is None) and isinstance(src.current_request_id, str) and src.current_request_id.strip():
+            dst.current_request_id = src.current_request_id
+
+        # 7) 生命周期字段：created_at 取更早的，last_activity 取更晚的
+        try:
+            dst.created_at = min(dst.created_at, src.created_at)
+        except Exception:
+            pass
+        try:
+            dst.last_activity = max(dst.last_activity, src.last_activity)
+        except Exception:
+            pass
+
     def migrate(self, from_id: str, to_id: str) -> None:
         """将会话从一个 id 迁移到另一个 id。
 
@@ -42,7 +117,7 @@ class SessionStore:
 
         规则：
         - 若 from_id 不存在：不做任何事
-        - 若 to_id 已存在：保留 to_id，会丢弃 from_id（避免覆盖已存在会话）
+        - 若 to_id 已存在：合并 src->dst 的会话态后删除 from_id（避免因时序竞争导致开关/音色丢失）
         """
         if not from_id or not to_id or from_id == to_id:
             return
@@ -52,6 +127,10 @@ class SessionStore:
             return
 
         if to_id in self._sessions:
+            dst = self._sessions.get(to_id)
+            if dst is not None:
+                self._merge_session_state(dst=dst, src=src)
+                dst.session_id = to_id
             self._sessions.pop(from_id, None)
             return
 

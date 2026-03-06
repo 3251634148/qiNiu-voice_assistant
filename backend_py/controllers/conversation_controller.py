@@ -312,6 +312,11 @@ class ConversationController:
                 return {"success": False, "error": "networkAccessEnabled 必须是布尔值"}
 
             session.network_access_enabled = enabled
+            # 记录“显式设置时间戳”，用于 sid->clientId 迁移时判定新旧优先级（避免时序竞争导致开关丢失）。
+            try:
+                session.network_access_set_at_ms = int(time.time() * 1000)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             return {"success": True, "networkAccessEnabled": session.network_access_enabled}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -333,6 +338,11 @@ class ConversationController:
                 return {"success": False, "error": "deviceLocationEnabled 必须是布尔值"}
 
             session.device_location_enabled = enabled
+            # 记录“显式设置时间戳”，用于 sid->clientId 迁移时判定新旧优先级（避免时序竞争导致开关丢失）。
+            try:
+                session.device_location_set_at_ms = int(time.time() * 1000)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
             if not enabled:
                 session.device_location = None
@@ -834,6 +844,11 @@ class ConversationController:
         if not tool_calls:
             return llm_resp
 
+        # 关键修复：tool-loop 必须使用“解析后的 session_id”（通常是 clientId），
+        # 不能直接用原始 sid（socket sid 或 room "client:<id>"），否则会读到错误的默认会话态，
+        # 表现为：capability 显示开启，但实际执行时 enabled=false（与你的 ui_debug 证据一致）。
+        session_id, _emit_to = self._resolve_session_and_emit_to(sid)
+
         names = [self._tool_name_from_call(tc) for tc in tool_calls]
         if not names or any(n is None for n in names):
             return llm_resp
@@ -845,7 +860,7 @@ class ConversationController:
         current = llm_resp
 
         # tool-loop 执行时可读取 session 中的设备定位（用于修复 location=auto 导致的错误地理解析）。
-        session = self.session_store.get_or_create(sid)
+        session = self.session_store.get_or_create(session_id)
         device_lon_lat = None
         if bool(getattr(session, "device_location_enabled", False)) and isinstance(getattr(session, "device_location", None), dict):
             device_lon_lat = str((session.device_location or {}).get("lonLat") or "").strip() or None
@@ -1160,7 +1175,32 @@ class ConversationController:
                             args_obj["location"] = device_lon_lat
                             override_reason = f"override_location_{raw_loc_s or 'empty'}_to_device_lon_lat"
                         else:
-                            raise RuntimeError("未获取到设备定位，请开启'设备定位'后重试")
+                            # 重要：不要 raise 未捕获异常（会导致 asyncio “Task exception was never retrieved”）。
+                            # 这里应该以“工具失败”的形式返回，让上层统一收敛并提示用户开启设备定位。
+                            err = "未获取到设备定位，请开启'设备定位'后重试"
+                            err_payload = {
+                                "tool": tool_name,
+                                "ok": False,
+                                "error": err,
+                                "meta": {"requestId": request_id, "round": round_idx, "toolCallId": tool_call_id},
+                                "requiresDeviceLocation": True,
+                            }
+                            self.network_tools_service.dump_debug_artifact(
+                                request_id=request_id,
+                                tag=f"net_tool_error_{tool_name}",
+                                payload=err_payload,
+                            )
+                            return (
+                                tool_call_id,
+                                json.dumps({"error": err}, ensure_ascii=False),
+                                {
+                                    "ok": False,
+                                    "tool": tool_name,
+                                    "args": args_obj,
+                                    "error": err,
+                                    "requiresDeviceLocation": True,
+                                },
+                            )
 
                 if override_reason:
                     self.network_tools_service.dump_debug_artifact(
@@ -1223,11 +1263,23 @@ class ConversationController:
 
             # 先执行设备定位（若模型要求，或天气工具使用了占位符 location）。
             device_calls = [tc for tc in tool_calls if (self._tool_name_from_call(tc) or "") == "get_device_location"]
-            needs_device_for_weather = any(
-                (self._tool_name_from_call(tc) or "") in {"get_weather_now", "get_weather_12h"}
-                and str(((tc.get("function") or {}).get("arguments") if isinstance(tc.get("function"), dict) else "") or "").lower().find("auto") >= 0
-                for tc in tool_calls
-            )
+            # C 修复：不要只检查 “auto” 子串；location="" 也是占位符（你的 ui_debug 里就是空串）。
+            needs_device_for_weather = False
+            for tc in tool_calls:
+                name = self._tool_name_from_call(tc) or ""
+                if name not in {"get_weather_now", "get_weather_12h"}:
+                    continue
+                args_raw = (tc.get("function") or {}).get("arguments") if isinstance(tc.get("function"), dict) else None
+                args_obj: Dict[str, Any] = {}
+                if isinstance(args_raw, str) and args_raw.strip():
+                    try:
+                        args_obj = json.loads(args_raw)
+                    except Exception:
+                        args_obj = {}
+                raw_loc_s = str((args_obj.get("location") or "")).strip().lower()
+                if raw_loc_s in {"", "auto", "current", "here", "local"}:
+                    needs_device_for_weather = True
+                    break
 
             results: List[Tuple[str, str, Dict[str, Any]]] = []
             if device_calls:
@@ -1288,12 +1340,15 @@ class ConversationController:
                 (str(m.get("tool") or "") == "get_device_location") and (not bool(m.get("ok")))
                 for _tid, _content, m in results
             )
+            has_missing_device_location = any(
+                bool(m.get("requiresDeviceLocation")) and (not bool(m.get("ok"))) for _tid, _content, m in results
+            )
             has_ip_location_policy_failure = any(
                 (str(m.get("tool") or "") == "get_ip_location") and (not bool(m.get("ok")))
                 for _tid, _content, m in results
             )
 
-            if (any_failed or (weather_ok is False)) and (not has_device_location_failure) and (not has_ip_location_policy_failure):
+            if (any_failed or (weather_ok is False)) and (not has_device_location_failure) and (not has_missing_device_location) and (not has_ip_location_policy_failure):
                 place = ""
                 if last_weather_query and (not last_weather_query.isdigit()) and "," not in last_weather_query:
                     place = last_weather_query
@@ -1484,7 +1539,8 @@ class ConversationController:
 
         if include_network or include_device_location:
             llm_resp = await self._maybe_run_network_tool_loop(
-                sid=sid,
+                # 关键修复：传入 session_id，避免 tool-loop 读错会话态（sid/room 可能导致默认 False）。
+                sid=session_id,
                 request_id=effective_request_id,
                 user_text=user_text,
                 messages=messages,

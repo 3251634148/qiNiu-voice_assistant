@@ -125,6 +125,7 @@ release/
 AGENTS.md
 md/
 .codebuddy/
+.cursor/
 
 # settings
 .env
