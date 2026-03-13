@@ -761,6 +761,187 @@ class MacOSUIAutomation:
         _, wid, bounds, owner = max(candidates, key=lambda x: x[0])
         return (wid, bounds, owner)
 
+    @classmethod
+    def _pick_child_window_from_infos(
+        cls,
+        *,
+        windows: Sequence[Any],
+        owner_names: Sequence[str],
+        parent_bounds: Mapping[str, Any],
+        min_area_ratio: float = 0.02,
+        max_area_ratio: float = 0.70,
+    ) -> Optional[Tuple[int, WindowBounds, str]]:
+        """从窗口列表中挑选“位于主窗口内部的弹窗子窗口”。
+
+        典型用途：企业微信 Shift+Cmd+F 的“全局搜索弹窗”是独立小窗口。
+        主窗口截图无法覆盖弹窗 UI（联系人 tab / 搜索结果列表），需要单独截取弹窗窗口。
+
+        选择策略（保守、可回归）：
+        - owner 匹配 owner_names（包含匹配）
+        - onscreen / alpha > 0
+        - child 窗口中心点落在 parent_bounds 内（避免误选其他屏幕/其他应用窗口）
+        - child 面积介于 [min_area_ratio, max_area_ratio] * parent_area 之间
+        - 评分优先选更大、更清晰的候选（面积 * alpha），以提高 OCR 稳定性
+        """
+
+        tokens = {cls._normalize_owner_name(str(n)) for n in owner_names if str(n).strip()}
+        tokens = {t for t in tokens if t}
+        if not tokens:
+            return None
+
+        def _owner_match(owner_name: str) -> bool:
+            o = cls._normalize_owner_name(owner_name)
+            if not o:
+                return False
+            for t in tokens:
+                if not t:
+                    continue
+                if t == o:
+                    return True
+                if len(t) >= 3 and t in o:
+                    return True
+                if len(o) >= 3 and o in t:
+                    return True
+            return False
+
+        pb = WindowBounds(
+            x=float(parent_bounds.get("x") or 0.0),
+            y=float(parent_bounds.get("y") or 0.0),
+            width=float(parent_bounds.get("width") or 0.0),
+            height=float(parent_bounds.get("height") or 0.0),
+        )
+        if pb.width < 200 or pb.height < 200:
+            return None
+
+        parent_area = float(pb.width * pb.height)
+        if parent_area <= 1:
+            return None
+
+        min_area = max(1.0, parent_area * float(min_area_ratio))
+        max_area = max(1.0, parent_area * float(max_area_ratio))
+
+        best: Optional[Tuple[float, int, WindowBounds, str]] = None
+
+        for info in windows:
+            if not hasattr(info, "get"):
+                continue
+
+            owner = str(info.get("kCGWindowOwnerName") or "").strip()
+            if not _owner_match(owner):
+                continue
+
+            bounds_dict = info.get("kCGWindowBounds")
+            if not hasattr(bounds_dict, "get"):
+                continue
+
+            bounds = cls._parse_window_bounds(bounds_dict)
+            if bounds.width < 120 or bounds.height < 80:
+                continue
+
+            # 中心点必须落在主窗口内（弹窗通常 overlay 在主窗口区域中）
+            cx = float(bounds.x + bounds.width / 2.0)
+            cy = float(bounds.y + bounds.height / 2.0)
+            if not (pb.x <= cx <= pb.x + pb.width and pb.y <= cy <= pb.y + pb.height):
+                continue
+
+            area = float(bounds.width * bounds.height)
+            if area < min_area or area > max_area:
+                continue
+
+            try:
+                alpha = float(info.get("kCGWindowAlpha") or 1.0)
+            except Exception:
+                alpha = 1.0
+            if alpha <= 0.01:
+                continue
+
+            is_onscreen_raw = info.get("kCGWindowIsOnscreen")
+            is_onscreen = bool(is_onscreen_raw is True or is_onscreen_raw == 1)
+            if not is_onscreen:
+                continue
+
+            window_id = info.get("kCGWindowNumber")
+            try:
+                wid = int(window_id)
+            except Exception:
+                continue
+
+            score = area * max(0.2, min(alpha, 1.0))
+            if best is None or score > best[0]:
+                best = (score, wid, bounds, owner)
+
+        if best is None:
+            return None
+        _, wid, bounds, owner = best
+        return (wid, bounds, owner)
+
+    async def screenshot_window_child_in_parent(
+        self,
+        *,
+        owner_names: Sequence[str],
+        parent_window_bounds: Mapping[str, Any],
+        tag: str = "window_child",
+        min_area_ratio: float = 0.02,
+        max_area_ratio: float = 0.70,
+    ) -> Dict[str, Any]:
+        """截取同一应用在主窗口内的“子窗口/弹窗”。
+
+        失败时抛异常，由调用方决定是否回退到其他策略。
+        """
+
+        out_path = self._debug_dir() / f"{tag}_{int(time.time() * 1000)}.png"
+
+        def _run() -> Dict[str, Any]:
+            try:
+                from Quartz import (
+                    CGWindowListCopyWindowInfo,
+                    kCGNullWindowID,
+                    kCGWindowListOptionOnScreenOnly,
+                )
+            except Exception as e:
+                raise RuntimeError(f"无法读取窗口列表（Quartz 不可用）：{e}")
+
+            windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) or []
+            picked = self._pick_child_window_from_infos(
+                windows=windows,
+                owner_names=owner_names,
+                parent_bounds=parent_window_bounds,
+                min_area_ratio=min_area_ratio,
+                max_area_ratio=max_area_ratio,
+            )
+            if picked is None:
+                raise RuntimeError("未找到主窗口内的子窗口/弹窗（用于全局搜索 tab 点击）")
+
+            wid, bounds, owner = picked
+            proc = subprocess.run(
+                ["screencapture", "-l", str(wid), "-x", "-o", str(out_path)],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr.strip() or "screencapture(子窗口) 执行失败")
+
+            compress_meta: Optional[dict[str, Any]] = None
+            if self._is_png_lossless_compress_enabled():
+                compress_meta = self._lossless_recompress_png_zlib_sync(str(out_path))
+
+            image_size = self._get_image_size_sync(str(out_path))
+            return {
+                "screenshotPath": str(out_path),
+                "ownerName": owner,
+                "windowId": wid,
+                "windowBounds": {
+                    "x": bounds.x,
+                    "y": bounds.y,
+                    "width": bounds.width,
+                    "height": bounds.height,
+                },
+                "imageSize": {"width": image_size.width, "height": image_size.height},
+                "pngLosslessCompress": compress_meta,
+            }
+
+        return await asyncio.to_thread(_run)
+
     async def screenshot_window(self, *, owner_names: Sequence[str], tag: str = "window") -> Dict[str, Any]:
         """Capture a specific app window to a PNG and return capture metadata.
 

@@ -5,6 +5,7 @@ import difflib
 import os
 import re
 import subprocess
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence
 
@@ -52,6 +53,150 @@ class WeComUIController:
         v = re.sub(r"\s+", "", v)
         v = v.replace("\uffff", "").replace("\ufffd", "")
         return v.strip().lower()
+
+    def _is_noise_text(self, text: str) -> bool:
+        """判断 OCR 文本是否明显不可能是联系人/会话标题。
+
+        目的：避免 ROI 偏大或 OCR 抽到聊天正文/草稿内容时，把长句当成联系人候选，
+        导致“直达会话/进入会话校验”误判并触发误发护栏中止。
+        """
+
+        raw = str(text or "").strip()
+        t = self._norm_text(raw)
+        if not t:
+            return True
+
+        # 常见无意义时间戳（会话列表右侧）
+        if re.fullmatch(r"\d{1,2}:\d{2}", t):
+            return True
+
+        # 正文样式：编号条目/段落符号（例如 "1. xxx" / "2) xxx" / "3、xxx"）
+        if re.match(r"^\s*\d+\s*[.)、]", raw):
+            return True
+
+        # 正文样式：较长且包含明显标点（更像句子而非人名/群名）
+        if len(raw) >= 12 and any(p in raw for p in ["。", "，", ",", "：", ":", "；", ";", "？", "!", "！", "/", "|"]):
+            return True
+
+        # 结果列表中的学号/编号等（纯数字且较长）通常不是联系人名
+        if re.fullmatch(r"\d{6,}", raw.strip()):
+            return True
+
+        # “没有找到相关结果 / 智能搜索提示”属于空态文案，不应被当作可点击结果
+        if "没有找到相关结果" in raw:
+            return True
+        if "智能搜索" in raw:
+            return True
+
+        # 会话列表常见标签噪声（草稿/文件/图片等）
+        if "草稿" in t or "图片" in t or "文件" in t:
+            return True
+
+        return False
+
+    def _candidate_text_variants_for_match(self, text: str) -> list[str]:
+        """生成用于匹配的候选文本变体（均为 _norm_text 后的形式）。
+
+        目的：联系人/群聊在 UI 中常以“姓名 + 后缀信息”的形式出现，例如：
+        - 罗晨曦@深圳大学
+        - 顾老师（导师）
+        直接对整串做 SequenceMatcher 会被“后缀长度惩罚”压低分数，导致误判。
+        """
+
+        raw = str(text or "").strip()
+        norm_full = self._norm_text(raw)
+        if not norm_full:
+            return []
+
+        variants: list[str] = [norm_full]
+
+        # 常见分隔符：@ / 括号 / 竖线
+        for delim in ["@", "（", "(", "【", "[", "|"]:
+            idx = norm_full.find(delim)
+            if idx > 0:
+                variants.append(norm_full[:idx])
+
+        # 去重，保持顺序
+        seen: set[str] = set()
+        out: list[str] = []
+        for v in variants:
+            if v and v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
+
+    def _best_match_box(self, boxes: Sequence[Any], *, target: str, min_conf: float) -> Optional[WeComPick]:
+        """在 OCR boxes 中选择最可能匹配 target 的候选。"""
+
+        t_norm = self._norm_text(target)
+        if not t_norm:
+            return None
+
+        best: Optional[WeComPick] = None
+        for b in boxes:
+            conf = float(getattr(b, "confidence", 0.0) or 0.0)
+            if conf < float(min_conf):
+                continue
+
+            txt = str(getattr(b, "text", "") or "").strip()
+            if self._is_noise_text(txt):
+                continue
+
+            variants = self._candidate_text_variants_for_match(txt)
+            if not variants:
+                continue
+
+            # 方案 A：若目标是候选的子串（如 “罗晨曦” in “罗晨曦@深圳大学”），视为强命中。
+            # 仅对长度>=2的目标启用，避免单字（如“师”）造成过宽匹配。
+            if len(t_norm) >= 2 and any(t_norm in v for v in variants):
+                sim = 1.0
+            else:
+                sim = max(difflib.SequenceMatcher(None, t_norm, v).ratio() for v in variants)
+
+            # 轻微长度加成：当相似度接近时，更偏向“完整会话名”而非极短片段。
+            # 注意：这里用“全量 norm 文本”的长度做加成，避免因截断变体过短导致不公平。
+            score = float(sim) + min(0.10, len(variants[0]) * 0.0015)
+            cand = WeComPick(text=txt, confidence=conf, similarity=float(sim), score=float(score))
+            if best is None or (cand.score, cand.confidence) > (best.score, best.confidence):
+                best = cand
+
+        return best
+
+    async def _cut_chat_input_draft_with_sentinel(self, *, debug_info: Dict[str, Any]) -> tuple[str, bool]:
+        """从当前焦点输入框中剪切草稿到剪贴板，并返回草稿内容。
+
+        设计目标：
+        - 仅当 **确实剪切到了输入框文本** 时，才允许后续“草稿回填”。
+        - 避免“输入框为空 / 剪切失败”时，把剪贴板里原本内容（例如联系人名）误当成草稿回填，
+          造成发送后又多粘贴一遍联系人名的现象。
+
+        判定策略（哨兵 sentinel）：
+        - 先把剪贴板设置为唯一哨兵；
+        - 执行 Cmd+A / Cmd+X；
+        - 若剪贴板仍为哨兵，视为未剪切到草稿（cut_ok=False）。
+        """
+
+        sentinel = f"__VA_DRAFT_SENTINEL__{uuid.uuid4().hex[:12]}"
+        debug_info["draftCutSentinelDigest"] = text_digest(sentinel).__dict__
+
+        try:
+            pbcopy(sentinel)
+            await asyncio.sleep(0.02)
+            await self.ui.hotkey("a", modifiers=["command down"])
+            await self.ui.hotkey("x", modifiers=["command down"])
+            await asyncio.sleep(0.05)
+            got = pbpaste()
+        except Exception as e:
+            debug_info.setdefault("warnings", []).append(f"剪切原草稿失败（忽略）：{e}")
+            debug_info["draftCutOk"] = False
+            return ("", False)
+
+        if got == sentinel:
+            debug_info["draftCutOk"] = False
+            return ("", False)
+
+        debug_info["draftCutOk"] = True
+        return (str(got or ""), True)
 
     async def _open_and_frontmost(self, *, debug: Dict[str, Any]) -> str:
         opened = None
@@ -162,10 +307,13 @@ class WeComUIController:
             # 左侧主导航（消息/邮件/文档/日程/通讯录…）
             "left_nav": roi_from_env("WECOM_LEFT_NAV_ROI", default=(0.0, 0.10, 0.14, 0.86)),
             # 左侧会话列表（用于"能直达就直达"，避免走全局搜索）
-            "chat_list": roi_from_env("WECOM_CHAT_LIST_ROI", default=(0.14, 0.16, 0.28, 0.78)),
+            # 注意：ROI 语义为 (x, y, w, h)。旧默认值 w/h 偏大，会吃进聊天正文/输入区，
+            # 导致把长句正文当成联系人候选（见 ui_debug directChatPick 误命中证据）。
+            "chat_list": roi_from_env("WECOM_CHAT_LIST_ROI", default=(0.14, 0.16, 0.16, 0.62)),
             # 聊天窗口顶部标题区（发送前校验，防误发）
-            # 实测标题文字在 y≈0.01~0.03、x≈0.33~0.37；旧值 (0.42,0.10,...) 偏移到聊天区导致 OCR 失败
-            "chat_header": roi_from_env("WECOM_CHAT_HEADER_ROI", default=(0.33, 0.01, 0.35, 0.08)),
+            # 实测标题文字位于窗口上方偏左；为了同时覆盖联系人名与其右侧的辅助信息，
+            # x 起点需略向左扩展，避免 OCR 只读到右侧文本而错过联系人名。
+            "chat_header": roi_from_env("WECOM_CHAT_HEADER_ROI", default=(0.24, 0.00, 0.46, 0.09)),
             # Shift+Cmd+F 全局搜索弹窗中的搜索区域
             "search_popup": roi_from_env("WECOM_SEARCH_POPUP_ROI", default=(0.02, 0.02, 0.55, 0.20)),
             # 全局搜索弹窗顶部 tabs（联系人/群聊/聊天记录…）
@@ -173,7 +321,16 @@ class WeComUIController:
             # 全局搜索结果区
             "results_list": roi_from_env("WECOM_RESULTS_LIST_ROI", default=(0.12, 0.22, 0.86, 0.70)),
         }
+        popup_rois = {
+            # 全局搜索弹窗 tabs 行（必须足够窄，避免把“搜索结果里出现的‘联系人’”识别进来造成干扰）
+            "tabs": roi_from_env("WECOM_POPUP_TABS_ROI", default=(0.02, 0.14, 0.96, 0.085)),
+            # 全局搜索弹窗结果列表区（切到“联系人”tab 后，用于定位联系人条目）
+            # 关键：y 起点必须足够靠上覆盖“第一条联系人结果卡片”，否则会出现
+            # “肉眼可见顾老师，但 OCR 只读到空态文案”的误判（见 requestId=827e8e43... 证据）。
+            "results": roi_from_env("WECOM_POPUP_RESULTS_ROI", default=(0.02, 0.225, 0.96, 0.70)),
+        }
         debug_info["rois"] = rois
+        debug_info["popupRois"] = popup_rois
 
         async def _ocr(
             cap: Dict[str, Any],
@@ -222,39 +379,6 @@ class WeComUIController:
             if not dry_run:
                 await self.ui.click_at(float(sx), float(sy), clicks=int(clicks))
 
-        def _is_noise_text(text: str) -> bool:
-            t = self._norm_text(text)
-            if not t:
-                return True
-            if re.fullmatch(r"\d{1,2}:\d{2}", t):
-                return True
-            if "草稿" in t or "图片" in t or "文件" in t:
-                return True
-            return False
-
-        def _best_match_box(boxes: Sequence[Any], *, target: str, min_conf: float) -> Optional[WeComPick]:
-            t_norm = self._norm_text(target)
-            if not t_norm:
-                return None
-
-            best: Optional[WeComPick] = None
-            for b in boxes:
-                conf = float(getattr(b, "confidence", 0.0) or 0.0)
-                if conf < float(min_conf):
-                    continue
-
-                txt = str(getattr(b, "text", "") or "").strip()
-                if _is_noise_text(txt):
-                    continue
-
-                n = self._norm_text(txt)
-                sim = difflib.SequenceMatcher(None, t_norm, n).ratio()
-                score = float(sim) + min(0.15, len(n) * 0.002)
-                cand = WeComPick(text=txt, confidence=conf, similarity=float(sim), score=float(score))
-                if best is None or (cand.score, cand.confidence) > (best.score, best.confidence):
-                    best = cand
-            return best
-
         def _has_any(boxes: Sequence[Any], keyword: str) -> bool:
             k = self._norm_text(keyword)
             if not k:
@@ -264,6 +388,57 @@ class WeComUIController:
                 if k in t:
                     return True
             return False
+
+        def _pick_tab_box(boxes: Sequence[Any], *, label: str) -> Optional[Any]:
+            """在 tabs ROI 的 OCR 结果中选择指定 tab（如“联系人”）。"""
+            want = self._norm_text(label)
+            if not want:
+                return None
+
+            best_box: Optional[Any] = None
+            best_score = -1.0
+            for b in boxes:
+                txt = str(getattr(b, "text", "") or "").strip()
+                t = self._norm_text(txt)
+                if not t:
+                    continue
+                # tabs 行通常是短词：允许包含/等于，但不在此处做“结果区”的误命中（ROI 已严格限制）。
+                if want not in t:
+                    continue
+                conf = float(getattr(b, "confidence", 0.0) or 0.0)
+                # 偏好更“干净”的匹配：完全等于 > 包含
+                exact_bonus = 0.6 if t == want else 0.2
+                score = float(conf) + float(exact_bonus)
+                if score > best_score:
+                    best_score = score
+                    best_box = b
+
+            return best_box
+
+        def _pick_first_result_box(boxes: Sequence[Any]) -> Optional[Any]:
+            """选择结果列表的“第一条”候选，用于兜底点击（方案 B）。
+
+            说明：OCR 返回的是多个文本框而不是结构化行；这里用 y 坐标最小的“非噪声文本框”
+            近似代表第一条结果的可点击区域。点击后仍会通过 chat_header 护栏验证，避免误发。
+            """
+
+            best_box: Optional[Any] = None
+            best_key: Optional[tuple[float, float, float]] = None  # (y, x, -conf)
+            for b in boxes:
+                txt = str(getattr(b, "text", "") or "").strip()
+                if self._is_noise_text(txt):
+                    continue
+                try:
+                    y = float(getattr(b, "y", 1e9) or 1e9)
+                    x = float(getattr(b, "x", 1e9) or 1e9)
+                except Exception:
+                    continue
+                conf = float(getattr(b, "confidence", 0.0) or 0.0)
+                key = (y, x, -conf)
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_box = b
+            return best_box
 
         async def _verify_chat_header_or_raise() -> None:
             cap_hdr = await self.ui.screenshot_window(owner_names=WECOM_APP_NAMES, tag="wecom_chat_header_verify")
@@ -275,7 +450,7 @@ class WeComUIController:
             if _has_any(hdr_boxes, contact):
                 return
 
-            pick = _best_match_box(hdr_boxes, target=contact, min_conf=0.30)
+            pick = self._best_match_box(hdr_boxes, target=contact, min_conf=0.30)
             debug_info["chatHeaderPick"] = pick.__dict__ if pick else None
             if pick is None or pick.similarity < 0.78:
                 raise RuntimeError("当前会话标题未命中目标联系人，已中止发送以避免误发")
@@ -318,7 +493,7 @@ class WeComUIController:
                         )
 
                         retry_boxes = await _ocr(cap_retry, roi=rois["chat_list"], custom_words=[contact])
-                        retry_pick = _best_match_box(retry_boxes, target=contact, min_conf=0.35)
+                        retry_pick = self._best_match_box(retry_boxes, target=contact, min_conf=0.35)
                         debug_info.setdefault("retryChatPick", []).append(
                             retry_pick.__dict__ if retry_pick else None
                         )
@@ -363,7 +538,7 @@ class WeComUIController:
         debug_info.setdefault("captures", []).append({"step": "chat_list_probe", "capture": cap_list})
 
         list_boxes = await _ocr(cap_list, roi=rois["chat_list"], custom_words=[contact])
-        direct_pick = _best_match_box(list_boxes, target=contact, min_conf=0.35)
+        direct_pick = self._best_match_box(list_boxes, target=contact, min_conf=0.35)
         debug_info["directChatPick"] = direct_pick.__dict__ if direct_pick else None
 
         if (not dry_run) and direct_pick is not None and direct_pick.similarity >= 0.78:
@@ -421,6 +596,10 @@ class WeComUIController:
         # 原因：screenshot_window 按面积选最大窗口（主窗口），无法截取全局搜索弹窗（独立小窗口），
         # 因此放弃"截图+OCR 在弹窗中操作"，改为纯键盘：输入 → 等待 → Return 选中第一个结果。
         if not opened_chat:
+            # 说明：
+            # - 旧实现采用“纯键盘 Return 选第一条综合结果”，当第一条是群聊时会进入错误会话并触发护栏中止。
+            # - 新实现：截取全局搜索弹窗窗口 -> 在严格 ROI 内点击“联系人”tab -> 在结果列表中点联系人。
+            # - 若弹窗窗口无法截取（Quartz 枚举不到），则回退到旧键盘策略（仍会做标题校验护栏，避免误发）。
             for attempt in range(3):
                 # A. 先用 Escape 关闭可能残留的弹窗/面板（key_code 53 = Escape 键码）
                 await self.ui.key_code(53)
@@ -444,22 +623,184 @@ class WeComUIController:
                 pbcopy(contact)
                 await asyncio.sleep(0.05)
                 await self.ui.hotkey("v", modifiers=["command down"])
-                await asyncio.sleep(1.5)  # 等待搜索结果加载（需要足够时间）
+                await asyncio.sleep(0.45)  # 先短等，后续会用“弹窗结果是否出现”做重试
 
                 debug_info["globalSearchKeyboard"][-1]["step"] = "input_done"
 
-                # D. 按 Return 选中搜索结果中的第一个联系人
-                # 企微全局搜索弹窗中，默认第一个结果已高亮，按 Return 即可进入该联系人会话
-                await self.ui.key_code(36)  # Return
-                await asyncio.sleep(0.5)  # 等待会话切换
+                # D. 尝试截取全局搜索弹窗窗口，并点击“联系人”tab
+                cap_parent = cap1  # 主窗口 bounds 用于筛选“位于主窗口内部”的弹窗窗口
+                popup_opened = False
+                clicked_contacts = False
+                clicked_result = False
+                popup_attempts: list[dict[str, Any]] = []
+                contacts_tab_selected = False
 
-                debug_info["globalSearchKeyboard"][-1]["step"] = "return_pressed"
+                for popup_try in range(2):
+                    try:
+                        cap_popup = await self.ui.screenshot_window_child_in_parent(
+                            owner_names=WECOM_APP_NAMES,
+                            parent_window_bounds=cap_parent.get("windowBounds") or {},
+                            tag=f"wecom_global_search_popup_{attempt}_{popup_try}",
+                        )
+                        debug_info.setdefault("captures", []).append(
+                            {"step": f"global_search_popup_{attempt}_{popup_try}", "capture": cap_popup}
+                        )
+                        popup_opened = True
 
-                # E. 用 Escape 关闭全局搜索弹窗残留（确保焦点回到聊天区域）
-                await self.ui.key_code(53)  # Escape
-                await asyncio.sleep(0.3)
+                        popup_attempts.append({"try": int(popup_try)})
 
-                debug_info["globalSearchKeyboard"][-1]["step"] = "popup_closed"
+                        # B：重试时不要重复点击“联系人”tab（企微可能会刷新/清空当前结果）。
+                        # 仅在本 attempt 第一次进入弹窗时尝试切到联系人。
+                        if not contacts_tab_selected:
+                            tab_boxes = await _ocr(
+                                cap_popup,
+                                roi=popup_rois["tabs"],
+                                custom_words=["联系人", "全部", "群聊", "聊天记录"],
+                            )
+                            popup_attempts[-1]["tabsPreview"] = [
+                                str(getattr(b, "text", "") or "") for b in tab_boxes[:12]
+                            ]
+
+                            tab_box = _pick_tab_box(tab_boxes, label="联系人")
+                            popup_attempts[-1]["tabPick"] = (
+                                str(getattr(tab_box, "text", "") or "") if tab_box else None
+                            )
+                            if tab_box is not None:
+                                await _click_box_center(
+                                    cap_popup,
+                                    tab_box,
+                                    step=f"popup_click_contacts_tab_{attempt}_{popup_try}",
+                                )
+                                clicked_contacts = True
+                                contacts_tab_selected = True
+                                await asyncio.sleep(0.35)
+                            else:
+                                # 如果 tabs OCR 都找不到联系人，则本轮不继续冒险点结果。
+                                await asyncio.sleep(0.20)
+                                continue
+
+                        # C：结果可能需要一点时间稳定渲染。这里做有限轮询（不会无限等待）。
+                        poll_delays = [0.20, 0.35, 0.55, 0.80]
+                        cap_popup2 = None
+                        result_boxes: list[Any] = []
+                        for pi, delay in enumerate(poll_delays):
+                            cap_popup2 = await self.ui.screenshot_window_child_in_parent(
+                                owner_names=WECOM_APP_NAMES,
+                                parent_window_bounds=cap_parent.get("windowBounds") or {},
+                                tag=f"wecom_global_search_popup_results_{attempt}_{popup_try}_{pi}",
+                            )
+                            debug_info.setdefault("captures", []).append(
+                                {
+                                    "step": f"global_search_popup_results_{attempt}_{popup_try}_{pi}",
+                                    "capture": cap_popup2,
+                                }
+                            )
+
+                            result_boxes = await _ocr(
+                                cap_popup2,
+                                roi=popup_rois["results"],
+                                custom_words=[contact],
+                            )
+                            preview = [str(getattr(b, "text", "") or "") for b in result_boxes[:14]]
+                            popup_attempts[-1][f"resultsPreview_{pi}"] = preview
+
+                            # 如果只读到空态提示，则继续等待（不视为有效结果）
+                            meaningful = False
+                            for s in preview:
+                                if not self._is_noise_text(s):
+                                    meaningful = True
+                                    break
+                            if meaningful:
+                                break
+
+                            await asyncio.sleep(delay)
+
+                        popup_attempts[-1]["resultsPreview"] = [
+                            str(getattr(b, "text", "") or "") for b in result_boxes[:14]
+                        ]
+
+                        pick = self._best_match_box(result_boxes, target=contact, min_conf=0.35)
+                        popup_attempts[-1]["resultPick"] = pick.__dict__ if pick else None
+                        if pick is None or pick.similarity < 0.78:
+                            # 方案 B（兜底）：如果结果区确实有 OCR 文本，但匹配阈值不达标，
+                            # 尝试点击“第一条结果”，随后仍会用 chat_header 护栏确认是否进入目标会话。
+                            fallback_box = _pick_first_result_box(result_boxes) if result_boxes else None
+                            popup_attempts[-1]["fallbackFirstBox"] = (
+                                str(getattr(fallback_box, "text", "") or "") if fallback_box else None
+                            )
+                            if fallback_box is not None and popup_try >= 1:
+                                await _click_box_center(
+                                    cap_popup2 or cap_popup,
+                                    fallback_box,
+                                    step=f"popup_click_first_result_fallback_{attempt}_{popup_try}",
+                                )
+                                clicked_result = True
+                                await asyncio.sleep(0.55)
+                                break
+
+                            # 结果可能未加载出来：按你要求“清空并重试搜索”
+                            try:
+                                await self.ui.hotkey("a", modifiers=["command down"])
+                                await self.ui.key_code(51)  # Delete
+                                await asyncio.sleep(0.05)
+                                pbcopy(contact)
+                                await asyncio.sleep(0.03)
+                                await self.ui.hotkey("v", modifiers=["command down"])
+                                await asyncio.sleep(0.25)
+                            except Exception as e:
+                                debug_info.setdefault("warnings", []).append(f"弹窗内重试搜索失败（忽略）：{e}")
+                            continue
+
+                        # 点击匹配到的联系人条目
+                        for b in result_boxes:
+                            txt = str(getattr(b, "text", "") or "").strip()
+                            if self._norm_text(txt) == self._norm_text(pick.text):
+                                await _click_box_center(
+                                    cap_popup2,
+                                    b,
+                                    step=f"popup_click_contact_result_{attempt}_{popup_try}",
+                                )
+                                clicked_result = True
+                                await asyncio.sleep(0.55)  # 等待会话切换
+                                break
+
+                        if clicked_result:
+                            break
+
+                    except Exception as e:
+                        popup_attempts.append({"try": int(popup_try), "error": str(e)})
+                        await asyncio.sleep(0.25)
+
+                debug_info.setdefault("globalSearchPopup", []).append(
+                    {
+                        "attempt": int(attempt),
+                        "popupOpened": bool(popup_opened),
+                        "clickedContactsTab": bool(clicked_contacts),
+                        "clickedResult": bool(clicked_result),
+                        "tries": popup_attempts,
+                    }
+                )
+
+                if clicked_result:
+                    # E. 用 Escape 关闭可能残留的弹窗（确保焦点回到聊天区域）
+                    await self.ui.key_code(53)  # Escape
+                    await asyncio.sleep(0.25)
+                    debug_info["globalSearchKeyboard"][-1]["step"] = "popup_closed"
+                else:
+                    # Fallback：若弹窗截取失败（popupOpened=False），才回退到旧键盘 Return 选第一条；
+                    # 若能截到弹窗但无法点到“联系人/结果”，继续下一轮 attempt（避免误点综合结果）。
+                    if not popup_opened:
+                        await self.ui.key_code(36)  # Return
+                        await asyncio.sleep(0.5)
+                        debug_info["globalSearchKeyboard"][-1]["step"] = "return_pressed_fallback"
+                        await self.ui.key_code(53)
+                        await asyncio.sleep(0.25)
+                        debug_info["globalSearchKeyboard"][-1]["step"] = "popup_closed"
+                    else:
+                        debug_info["globalSearchKeyboard"][-1]["step"] = "popup_click_failed"
+                        await asyncio.sleep(0.25)
+                        # 进入下一次 attempt 重试
+                        pass
 
                 # F. 截图验证：检查主窗口的聊天标题区是否已切换到目标联系人
                 cap_gs_verify = await self.ui.screenshot_window(
@@ -485,7 +826,7 @@ class WeComUIController:
                     debug_info["globalSearchKeyboard"][-1]["verified"] = True
                     break
 
-                hdr_pick = _best_match_box(hdr_boxes, target=contact, min_conf=0.30)
+                hdr_pick = self._best_match_box(hdr_boxes, target=contact, min_conf=0.30)
                 debug_info["globalSearchKeyboard"][-1]["headerPick"] = (
                     hdr_pick.__dict__ if hdr_pick else None
                 )
@@ -528,14 +869,7 @@ class WeComUIController:
         original_clipboard = pbpaste()
         debug_info["clipboardDigestBefore"] = text_digest(original_clipboard).__dict__
 
-        old_draft = ""
-        try:
-            await self.ui.hotkey("a", modifiers=["command down"])
-            await self.ui.hotkey("x", modifiers=["command down"])
-            await asyncio.sleep(0.05)
-            old_draft = pbpaste()
-        except Exception as e:
-            debug_info.setdefault("warnings", []).append(f"剪切原草稿失败（忽略）：{e}")
+        old_draft, cut_ok = await self._cut_chat_input_draft_with_sentinel(debug_info=debug_info)
 
         debug_info["oldDraftDigest"] = text_digest(old_draft).__dict__
 
@@ -546,7 +880,8 @@ class WeComUIController:
         await self.ui.key_code(36)  # Enter 发送
         await asyncio.sleep(0.20)
 
-        if old_draft.strip():
+        # 仅当确实从输入框剪切到了草稿时，才允许回填；避免误把剪贴板内容回填进输入框。
+        if cut_ok and old_draft.strip():
             pbcopy(old_draft)
             await asyncio.sleep(0.05)
             await self.ui.hotkey("v", modifiers=["command down"])
