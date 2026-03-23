@@ -1,0 +1,27 @@
+# Python backend (backend_py/) dependencies
+# Target runtime: Python 3.11.x
+
+fastapi==0.115.6
+pydantic==2.10.4
+uvicorn==0.34.0
+python-socketio==5.12.0
+python-dotenv==1.0.1
+httpx==0.28.1
+aiohttp==3.11.11
+websockets==14.1
+cryptography==42.0.8
+
+# macOS UI automation (Vision OCR + Quartz input)
+pyobjc-core==12.1
+pyobjc-framework-Cocoa==12.1
+pyobjc-framework-Quartz==12.1
+pyobjc-framework-Vision==12.1
+pyobjc-framework-CoreLocation==12.1
+
+# 全局热键监听 + 麦克风录音（模块1：热键唤醒语音接收）
+pynput>=1.7.6
+sounddevice>=0.5.0
+numpy>=1.24.0
+
+# tests
+pytest==9.0.2

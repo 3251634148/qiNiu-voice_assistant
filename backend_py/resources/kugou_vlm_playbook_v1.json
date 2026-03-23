@@ -1,0 +1,61 @@
+{
+  "version": "v1",
+  "app": "kugou",
+  "task": "search_and_play",
+  "states": [
+    "not_music_main",
+    "music_main",
+    "search_view",
+    "results_view",
+    "overlay_panel",
+    "overlay_fullscreen",
+    "playing",
+    "unknown"
+  ],
+  "targets": [
+    "sidebar_music",
+    "search_entry",
+    "back_button",
+    "search_input",
+    "submit_search",
+    "tab_single",
+    "song_item",
+    "unknown"
+  ],
+  "state_target_allow": {
+    "not_music_main": [
+      "sidebar_music",
+      "back_button"
+    ],
+    "music_main": [
+      "search_entry",
+      "back_button"
+    ],
+    "search_view": [
+      "search_input",
+      "submit_search"
+    ],
+    "results_view": [
+      "tab_single",
+      "song_item"
+    ],
+    "overlay_panel": [
+      "back_button"
+    ],
+    "overlay_fullscreen": [
+      "back_button"
+    ],
+    "playing": [
+      "unknown"
+    ],
+    "unknown": [
+      "unknown",
+      "back_button"
+    ]
+  },
+  "notes": {
+    "results_view_restriction": "results_view 仅允许 tab_single / song_item",
+    "webp_only": "输入给 VLM 的图片必须是 WebP（quality=95），不提供 PNG/JPEG 兜底",
+    "type_text_clear": "每次 type_text 前，程序会执行 Cmd+A + Delete 清空"
+  }
+}

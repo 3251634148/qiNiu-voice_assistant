@@ -42,9 +42,42 @@ export function useSocket() {
         setIsInitialized(true);
         setConnectionState({ connected: true, connecting: false });
 
+        // 同步一次前端持久化设置到后端（例如：联网开关 / 设备定位）
+        const initialSettings = getSettings();
+        try {
+          socket.updateNetworkSettings({
+            networkAccessEnabled: !!initialSettings.networkAccessEnabled,
+          });
+        } catch (error) {
+          console.log("同步联网设置失败（忽略）:", (error as any)?.message);
+        }
+
+        try {
+          socket.updateDeviceLocation({
+            deviceLocationEnabled: !!initialSettings.deviceLocationEnabled,
+            lonLat: initialSettings.deviceLocationLonLat,
+            tsMs: initialSettings.deviceLocationTsMs,
+          });
+        } catch (error) {
+          console.log("同步设备定位失败（忽略）:", (error as any)?.message);
+        }
+
         // 设置事件监听器 - 只在第一次连接时设置
         socket.onSpeechRecognized((data) => {
-          addMessage("user", data.text);
+          const currentRequestId = activeRequestIdRef.current;
+          const incomingRequestId = (data as any)?.requestId as string | undefined;
+
+          if (incomingRequestId && currentRequestId && incomingRequestId !== currentRequestId) {
+            console.log("忽略旧 speech-recognized", {
+              incomingRequestId,
+              currentRequestId,
+            });
+            return;
+          }
+
+          addMessage("user", data.text, {
+            requestId: incomingRequestId,
+          });
         });
 
         socket.onAssistantMessage((data) => {
@@ -459,14 +492,8 @@ export function useSocket() {
     [getAudioContext, getGainNode, setVoiceState]
   );
 
-  const sendVoiceInput = useCallback((audioData: ArrayBuffer, language?: string) => {
-    if (socketRef.current) {
-      socketRef.current.sendVoiceInput(audioData, language);
-    }
-  }, []);
-
-  const sendTextCommand = useCallback(
-    (text: string) => {
+  const sendVoiceInput = useCallback(
+    (audioData: ArrayBuffer, language?: string) => {
       if (socketRef.current) {
         // stopSpeaking 会短暂拉起 stopAllRef，这里切换到新 requestId 时立刻解除
         stopAllRef.current = false;
@@ -474,9 +501,28 @@ export function useSocket() {
         const requestId = generateRequestId();
         activeRequestIdRef.current = requestId;
 
-        addMessage("user", text, { requestId });
-        socketRef.current.sendTextCommand(text, requestId);
+        socketRef.current.sendVoiceInput(audioData, language, requestId);
       }
+    },
+    []
+  );
+
+  const sendTextCommand = useCallback(
+    async (text: string) => {
+      if (!socketRef.current) {
+        return;
+      }
+
+      // stopSpeaking 会短暂拉起 stopAllRef，这里切换到新 requestId 时立刻解除
+      stopAllRef.current = false;
+
+      const trimmed = String(text || "").trim();
+      const requestId = generateRequestId();
+      activeRequestIdRef.current = requestId;
+
+      // 设备定位将由后端 macOS CoreLocation 工具实时获取；前端仅负责授权开关同步。
+      addMessage("user", trimmed, { requestId });
+      socketRef.current.sendTextCommand(trimmed, requestId);
     },
     [addMessage]
   );
@@ -526,6 +572,17 @@ export function useSocket() {
   const updateTTSSettings = useCallback((settings: any) => {
     socketRef.current?.updateTTSSettings(settings);
   }, []);
+
+  const updateNetworkSettings = useCallback((networkAccessEnabled: boolean) => {
+    socketRef.current?.updateNetworkSettings({ networkAccessEnabled });
+  }, []);
+
+  const updateDeviceLocation = useCallback(
+    (payload: { deviceLocationEnabled: boolean; lonLat?: string; tsMs?: number }) => {
+      socketRef.current?.updateDeviceLocation(payload);
+    },
+    []
+  );
 
   const getTTSSettings = useCallback(() => {
     socketRef.current?.getTTSSettings();
@@ -648,6 +705,8 @@ export function useSocket() {
     getSessionStatus,
     getSessionHistory,
     updateTTSSettings,
+    updateNetworkSettings,
+    updateDeviceLocation,
     getTTSSettings,
     getAvailableVoices,
     stopSpeaking,

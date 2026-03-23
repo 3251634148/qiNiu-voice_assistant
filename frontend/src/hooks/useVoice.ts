@@ -1,5 +1,4 @@
 import { useCallback, useRef, useState } from "react";
-import { useApp } from "./useApp";
 
 interface UseVoiceReturn {
   isRecording: boolean;
@@ -9,209 +8,220 @@ interface UseVoiceReturn {
   toggleRecording: () => Promise<void>;
 }
 
+const DEFAULT_LANGUAGE = "zh-CN";
+const STOP_BUFFER_MS = 600;
+
 export function useVoice(
   onTextCommand?: (text: string) => void,
-  _sendVoiceInput?: (audioData: ArrayBuffer, language?: string) => void
+  sendVoiceInput?: (audioData: ArrayBuffer, language?: string) => void
 ): UseVoiceReturn {
-  const { state } = useApp();
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const _audioChunksRef = useRef<Blob[]>([]);
-  const recognitionCallbackRef = useRef<((text: string) => void) | null>(null);
-  const finalTranscriptRef = useRef<string>("");
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const stopTimerRef = useRef<number | null>(null);
 
-  // Web Speech API识别函数
-  const useWebSpeechRecognition = async (callback?: (text: string) => void) => {
-    return new Promise<void>((resolve, reject) => {
-      if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
-        const SpeechRecognition =
-          (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-        const recognition = new SpeechRecognition();
+  const cleanupMedia = useCallback(() => {
+    if (stopTimerRef.current) {
+      window.clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
 
-        recognition.lang = "zh-CN";
-        recognition.continuous = true; // 启用持续监听
-        recognition.interimResults = true; // 启用中间结果
-        recognition.maxAlternatives = 1;
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current = null;
+    }
 
-        let hasRecognized = false;
-        finalTranscriptRef.current = "";
-        recognitionCallbackRef.current = callback || null;
-
-        recognition.onresult = (event: any) => {
-          let interimTranscript = "";
-
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            const result = event.results[i];
-            if (result.isFinal) {
-              finalTranscriptRef.current += result[0].transcript;
-            } else {
-              interimTranscript += result[0].transcript;
-            }
-          }
-
-          // 如果有中间结果，显示出来（可选）
-          if (interimTranscript) {
-            console.log("中间识别结果:", interimTranscript);
-          }
-
-          // 如果有最终结果，保存起来
-          if (finalTranscriptRef.current) {
-            console.log("累积识别结果:", finalTranscriptRef.current);
-          }
-        };
-
-        recognition.onerror = (event: any) => {
-          console.error("Web Speech API识别失败:", event.error);
-          let fallbackText = "语音识别失败，请使用文本输入";
-
-          switch (event.error) {
-            case "no-speech":
-              fallbackText = "未检测到语音，请重试";
-              break;
-            case "audio-capture":
-              fallbackText = "无法访问麦克风，请检查权限设置";
-              break;
-            case "not-allowed":
-              fallbackText = "麦克风权限被拒绝，请允许访问";
-              break;
-            case "network":
-              fallbackText = "网络连接错误，请检查网络";
-              break;
-            default:
-              fallbackText = "语音识别失败，请使用文本输入";
-          }
-
-          if (recognitionCallbackRef.current && !hasRecognized) {
-            hasRecognized = true;
-            recognitionCallbackRef.current(fallbackText);
-          }
-          reject(new Error(`Speech recognition error: ${event.error}`));
-        };
-
-        recognition.onend = () => {
-          console.log("Web Speech API识别结束");
-
-          // 当识别结束时，如果有累积的文本，发送它
-          if (finalTranscriptRef.current.trim() && !hasRecognized) {
-            hasRecognized = true;
-            if (recognitionCallbackRef.current) {
-              recognitionCallbackRef.current(finalTranscriptRef.current.trim());
-            }
-            resolve();
-            return;
-          }
-
-          // 如果还没有识别到结果且仍在录音状态，继续监听
-          if (!hasRecognized && isRecording) {
-            try {
-              setTimeout(() => {
-                if (isRecording && !hasRecognized) {
-                  recognition.start();
-                }
-              }, 100);
-            } catch (error) {
-              console.error("重新启动语音识别失败:", error);
-              if (!hasRecognized) {
-                // 如果重新启动失败且有中间结果，使用中间结果
-                if (finalTranscriptRef.current.trim() && recognitionCallbackRef.current) {
-                  hasRecognized = true;
-                  recognitionCallbackRef.current(finalTranscriptRef.current.trim());
-                } else if (recognitionCallbackRef.current) {
-                  recognitionCallbackRef.current("未识别到有效语音，请重试");
-                }
-                resolve();
-              }
-            }
-          } else {
-            // 如果手动停止但没有最终结果，尝试使用中间结果
-            if (
-              !hasRecognized &&
-              finalTranscriptRef.current.trim() &&
-              recognitionCallbackRef.current
-            ) {
-              hasRecognized = true;
-              recognitionCallbackRef.current(finalTranscriptRef.current.trim());
-            } else if (!hasRecognized && recognitionCallbackRef.current) {
-              recognitionCallbackRef.current("未识别到有效语音，请重试");
-            }
-            resolve();
-          }
-        };
-
-        // 保存recognition实例以便手动停止
-        (window as any).currentRecognition = recognition;
-        recognition.start();
-      } else {
-        console.warn("浏览器不支持Web Speech API");
-        const fallbackText = "浏览器不支持语音识别，请使用文本输入";
-        if (callback) {
-          callback(fallbackText);
-        }
-        reject(new Error("Web Speech API not supported"));
+    if (streamRef.current) {
+      for (const track of streamRef.current.getTracks()) {
+        track.stop();
       }
-    });
+      streamRef.current = null;
+    }
+
+    audioChunksRef.current = [];
+  }, []);
+
+  const pickSupportedMimeType = () => {
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      // Safari may support mp4
+      "audio/mp4",
+    ];
+
+    if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+      return "";
+    }
+
+    for (const t of candidates) {
+      if (MediaRecorder.isTypeSupported(t)) {
+        return t;
+      }
+    }
+
+    return "";
   };
+
+  const startBackendRecording = useCallback(async () => {
+    if (!sendVoiceInput) {
+      throw new Error("sendVoiceInput 未提供");
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("浏览器不支持麦克风录音");
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    streamRef.current = stream;
+
+    const mimeType = pickSupportedMimeType();
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+    audioChunksRef.current = [];
+    mediaRecorderRef.current = recorder;
+
+    recorder.ondataavailable = (event: BlobEvent) => {
+      if (event.data && event.data.size > 0) {
+        audioChunksRef.current.push(event.data);
+      }
+    };
+
+    recorder.onerror = (event: Event) => {
+      console.error("录音失败:", event);
+    };
+
+    recorder.onstop = async () => {
+      try {
+        const blobType = recorder.mimeType || mimeType || "audio/webm";
+        const audioBlob = new Blob(audioChunksRef.current, { type: blobType });
+        const buffer = await audioBlob.arrayBuffer();
+
+        // 交给后端做 ASR：后端会发回 speech-recognized，并继续走 text-command
+        sendVoiceInput(buffer, DEFAULT_LANGUAGE);
+      } catch (error) {
+        console.error("发送语音到后端失败:", error);
+
+        // 后端模式失败时，尽量回退到文本提示，不阻塞用户
+        if (onTextCommand) {
+          onTextCommand("语音识别失败，请使用文本输入");
+        }
+      } finally {
+        cleanupMedia();
+        setIsRecording(false);
+      }
+    };
+
+    // timeslice 让浏览器持续产出数据，减少 stop 时丢尾巴的概率
+    recorder.start(250);
+    setIsRecording(true);
+  }, [cleanupMedia, onTextCommand, sendVoiceInput]);
+
+  // Web Speech API 识别（兜底）
+  const startWebSpeechRecognition = useCallback(async () => {
+    return new Promise<void>((resolve, reject) => {
+      if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
+        reject(new Error("Web Speech API not supported"));
+        return;
+      }
+
+      const SpeechRecognition =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      const recognition = new SpeechRecognition();
+
+      recognition.lang = DEFAULT_LANGUAGE;
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      let finalTranscript = "";
+      let hasRecognized = false;
+
+      recognition.onresult = (event: any) => {
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const result = event.results[i];
+          if (result.isFinal) {
+            finalTranscript += result[0].transcript;
+          }
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error("Web Speech API识别失败:", event.error);
+        if (!hasRecognized && onTextCommand) {
+          hasRecognized = true;
+          onTextCommand("语音识别失败，请使用文本输入");
+        }
+        reject(new Error(`Speech recognition error: ${event.error}`));
+      };
+
+      recognition.onend = () => {
+        if (!hasRecognized && onTextCommand) {
+          hasRecognized = true;
+          const text = finalTranscript.trim();
+          onTextCommand(text || "未识别到有效语音，请重试");
+        }
+        resolve();
+      };
+
+      (window as any).currentRecognition = recognition;
+      recognition.start();
+      setIsRecording(true);
+    });
+  }, [onTextCommand]);
 
   const startRecording = useCallback(async () => {
     try {
-      // 直接使用Web Speech API，无需录音
-      console.log("开始语音识别...");
-      setIsRecording(true);
-
-      try {
-        await useWebSpeechRecognition((recognizedText) => {
-          console.log("语音识别结果:", recognizedText);
-          // 将识别的文本发送到后端处理
-          if (onTextCommand && typeof onTextCommand === "function") {
-            onTextCommand(recognizedText);
-          }
-          // 识别完成后自动停止录音
-          setIsRecording(false);
-        });
-      } catch (error) {
-        console.error("Web Speech API识别失败:", error);
-        // 如果Web Speech API失败，提示用户使用文本输入
-        if (onTextCommand && typeof onTextCommand === "function") {
-          const fallbackText = "语音识别失败，请使用文本输入";
-          onTextCommand(fallbackText);
-        }
-        setIsRecording(false);
+      // 默认优先走后端 ASR（千问 Audio），失败再回退 Web Speech
+      if (sendVoiceInput) {
+        await startBackendRecording();
+        return;
       }
+
+      await startWebSpeechRecognition();
     } catch (error) {
-      console.error("开始语音识别失败:", error);
+      console.error("开始语音输入失败:", error);
       setIsRecording(false);
-      throw new Error("无法启动语音识别");
+      cleanupMedia();
+      throw error;
     }
-  }, [onTextCommand, useWebSpeechRecognition]);
+  }, [cleanupMedia, sendVoiceInput, startBackendRecording, startWebSpeechRecognition]);
 
   const stopRecording = useCallback(() => {
-    console.log("手动停止语音识别");
+    // 后端录音模式：给 stop 留一点缓冲，减少截断
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      if (stopTimerRef.current) {
+        window.clearTimeout(stopTimerRef.current);
+      }
 
-    // 停止Web Speech API
+      stopTimerRef.current = window.setTimeout(() => {
+        try {
+          recorder.requestData();
+          recorder.stop();
+        } catch (error) {
+          console.error("停止录音失败:", error);
+          cleanupMedia();
+          setIsRecording(false);
+        }
+      }, STOP_BUFFER_MS);
+
+      return;
+    }
+
+    // Web Speech API 模式：直接 stop，让浏览器触发 onend 发送最终结果
     const currentRecognition = (window as any).currentRecognition;
     if (currentRecognition) {
       try {
-        // 在停止前，如果有累积的文本，先发送它
-        if (finalTranscriptRef.current.trim() && recognitionCallbackRef.current) {
-          console.log("手动停止时发送累积的识别结果:", finalTranscriptRef.current.trim());
-          recognitionCallbackRef.current(finalTranscriptRef.current.trim());
-          finalTranscriptRef.current = "";
-          recognitionCallbackRef.current = null;
-        }
-
         currentRecognition.stop();
-
-        // 清理引用
-        setTimeout(() => {
-          (window as any).currentRecognition = null;
-        }, 500);
       } catch (error) {
         console.error("停止语音识别失败:", error);
+      } finally {
         (window as any).currentRecognition = null;
       }
     }
+
     setIsRecording(false);
-  }, []);
+  }, [cleanupMedia]);
 
   const toggleRecording = useCallback(async () => {
     if (isRecording) {

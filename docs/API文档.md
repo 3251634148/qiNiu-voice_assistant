@@ -6,7 +6,7 @@
 
 ## 基础信息
 
-- **服务器地址**: `http://localhost:3001`
+- **服务器地址**: `http://localhost:3002`
 - **API 版本**: v1
 - **协议**: HTTP/HTTPS 和 WebSocket
 
@@ -389,7 +389,7 @@ Message[]  // 消息对象数组
 ```javascript
 import io from 'socket.io-client';
 
-const socket = io('http://localhost:3001');
+const socket = io('http://localhost:3002');
 
 // 监听助手消息
 socket.on('assistant-message', (data) => {
@@ -437,7 +437,7 @@ async def request_confirmation(data):
     })
 
 async def main():
-    await sio.connect('http://localhost:3001')
+    await sio.connect('http://localhost:3002')
     await sio.emit('text-command', {'text': '写一篇文章'})
     await sio.wait()
 

@@ -16,6 +16,8 @@ build/
 .env.development.local
 .env.test.local
 .env.production.local
+backend/.env
+backend/.env.example
 
 # Logs
 logs/
@@ -30,6 +32,7 @@ pids/
 *.pid
 *.seed
 *.pid.lock
+__pycache__
 
 # Coverage directory used by tools like istanbul
 coverage/
@@ -107,7 +110,6 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
-temp_md/
 *.tmp
 *.temp
 
@@ -123,6 +125,8 @@ release/
 AGENTS.md
 md/
 .codebuddy/
+.cursor/
 
 # settings
 .env
+.venv

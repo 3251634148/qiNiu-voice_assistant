@@ -51,7 +51,7 @@ if not exist "backend\logs" mkdir backend\logs
 
 echo 🚀 启动开发服务器...
 echo 前端地址: http://localhost:5173
-echo 后端地址: http://localhost:3001
+echo 后端地址: http://localhost:3002
 echo 按 Ctrl+C 停止服务器
 echo.
 
