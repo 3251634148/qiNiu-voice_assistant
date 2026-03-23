@@ -1,3 +1,38 @@
+## 2026-03-13（Ollama 适配增强 — provider 分层 / 原生 /api/chat / tool-loop 回填兼容）
+
+### 🔧 问题修复
+
+- **修复 `LLM_PROVIDER=ollama` 时“配置层已切换但协议层仍沿用 OpenAI 兼容 `/chat/completions`”导致的链路不一致问题**：
+  - **根本原因**：`backend_py/services/llm_service.py` 虽然已支持 `dashscope/ollama` provider 切换，但实际请求仍统一走 OpenAI 兼容 `/chat/completions`；而项目内 `backend_py/services/ollama_client.py` 的原生 `/api/chat` 能力并未接入主会话链路。
+  - **修复**：
+    - `LLMService.invoke_llm()` 拆分为 DashScope 与 Ollama 两条 provider 专用适配路径。
+    - DashScope 继续保留现有 `/chat/completions` 行为；Ollama 改为走原生 `/api/chat`。
+    - Ollama 路径新增 `output_mode=json/schema_json` 与 `format` 透传能力，为 structured outputs 预留统一入口。
+- **修复 Ollama tool calling 返回结构与现有控制器内部协议不一致的问题**：
+  - **根本原因**：Ollama 常将 `message.tool_calls[].function.arguments` 直接返回为对象，而现有 `ConversationController/ToolRouter` 主要按 JSON 字符串读取参数。
+  - **修复**：
+    - `backend_py/services/ollama_client.py` 新增 tool_calls 规范化逻辑，统一转换为项目内部使用的 `function.arguments=<json string>` 结构。
+    - 若模型未返回 tool call id，则由本地生成稳定 id，避免后续 tool-loop / 调试链路缺失标识。
+- **修复 Ollama tool-loop 工具结果回填协议与官方文档不一致的问题**：
+  - **根本原因**：`backend_py/controllers/conversation_controller.py` 之前统一将工具结果回填为 `role=tool + tool_call_id`，这更接近 OpenAI 兼容思路；而 Ollama 官方文档推荐 `role=tool + tool_name + content`。
+  - **修复**：
+    - 新增 provider 感知的 tool-loop 消息构造器。
+    - assistant 的 `tool_calls` 回填保持统一；tool 结果回填在 Ollama provider 下改为 `tool_name` 形式，在 DashScope 下继续使用原 `tool_call_id` 形式。
+- **修复 `OLLAMA_BASE_URL` 带 `/v1` 时调用原生 `/api/chat` 可能拼错地址的问题**：
+  - **修复**：`OllamaClient` 新增 base URL 归一化逻辑，兼容 `http://host:11434`、`/v1`、`/api`、`/api/chat` 多种输入形态。
+- **优化长期记忆偏好抽取在 Ollama 下的结构化输出稳定性**：
+  - **修复**：偏好抽取调用在 Ollama provider 下显式使用 `output_mode="json"`，增强 JSON 返回一致性，同时不改动现有 `parse_and_save_profile()` 的解析入口。
+
+### 🧪 测试
+
+- 新增：
+  - `test_scripts/test_ollama_provider_adaptation.py`
+- 更新：
+  - `test_scripts/test_ollama_chat_smoke.py`（补充 normalizedBaseUrl 与 toolCalls 输出）
+- 已执行：
+  - `cd backend_py && source .venv/bin/activate && python -m pytest ../test_scripts/test_ollama_provider_adaptation.py ../test_scripts/test_device_location_tool_loop_regression.py -q`
+  - 结果：`7 passed`
+
 ## 2026-03-04（根因修复 — 设备定位开关不生效 / tool-loop 读错会话 / 热键链路一致性）
 
 ### 🔧 问题修复
@@ -50,7 +85,7 @@
 
 #### 模块3：LLM 提供者配置化
 - 支持通过环境变量 `LLM_PROVIDER` 切换 DashScope（远程）和 Ollama（本地）两种 LLM 后端
-- Ollama 使用 OpenAI 兼容 API（`http://localhost:11434/v1`），默认模型 `wangshenzhi/llama3-8b-chinese-chat-ollama-q4`
+- Ollama 使用 OpenAI 兼容 API（`http://localhost:11434/v1`），默认模型 `qwen3.5`
 - 新增配置项：`LLM_PROVIDER`、`OLLAMA_BASE_URL`、`OLLAMA_MODEL`
 
 #### 模块4：本地 LLM 长期记忆系统

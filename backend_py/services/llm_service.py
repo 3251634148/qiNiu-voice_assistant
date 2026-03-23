@@ -10,6 +10,7 @@ import httpx
 
 from backend_py.config import settings
 from backend_py.services.network_tools_service import NetworkToolsService
+from backend_py.services.ollama_client import OllamaClient
 
 
 logger = logging.getLogger("backend_py.llm")
@@ -20,17 +21,19 @@ class LLMService:
 
     通过环境变量 LLM_PROVIDER 切换：
     - dashscope（默认）：阿里云千问 OpenAI 兼容模式
-    - ollama：本地 Ollama（OpenAI 兼容 API，http://localhost:11434/v1）
+    - ollama：本地 Ollama（原生 `/api/chat`）
     """
 
     def __init__(self) -> None:
         self.stub_enabled = str(os.getenv("VOICE_ASSISTANT_LLM_STUB", "")).strip().lower() in {"1", "true", "yes"}
         self.provider = settings.llm_provider  # "dashscope" or "ollama"
+        self.ollama_client: Optional[OllamaClient] = None
 
         if self.provider == "ollama":
             self.base_url = settings.ollama_base_url
             self.api_key = "ollama"  # Ollama 不需要真实 key，但 HTTP 头需要非空值
             self.model_default = settings.ollama_model
+            self.ollama_client = OllamaClient(base_url=self.base_url, timeout_sec=60.0)
             logger.info("LLM 后端: Ollama (base_url=%s, model=%s)", self.base_url, self.model_default)
         else:
             if not self.stub_enabled and not settings.dashscope_api_key:
@@ -503,28 +506,41 @@ class LLMService:
             return [*base, *self.network_tools.get_tool_definitions()]
         return base
 
-    async def invoke_llm(
-        self,
-        messages: List[Dict[str, str]],
-        *,
-        model: Optional[str] = None,
-        tools: Optional[List[Dict[str, Any]]] = None,
-        max_tokens: int = 512,
-        parallel_tool_calls: bool = False,
-        memory_context: str = "",
-    ) -> Dict[str, Any]:
-        if self.stub_enabled:
-            return self._invoke_llm_stub(messages)
+    def _build_system_content(self, *, memory_context: str) -> str:
+        """构建 system prompt。
 
-        used_model = model or self.model_default
-        # tools=None 表示使用默认工具；tools=[] 表示显式禁用工具（例如让模型只总结工具结果）。
-        tool_defs = self.function_definitions if tools is None else tools
+        现有主链路大量依赖 `INTENT_JSON + SAY` 协议，因此 provider 切换时仍保持同一
+        套高层提示词，只在协议层做 provider 专用适配，避免影响 TTS / memory / 前端调试。
+        """
 
-        # 构建 system prompt：基础规则 + 记忆上下文（user_profile + rolling_summary）
-        sys_content = self.system_prompt
         if memory_context:
-            sys_content = f"{self.system_prompt}\n\n{memory_context}"
+            return f"{self.system_prompt}\n\n{memory_context}"
+        return self.system_prompt
 
+    @staticmethod
+    def _stringify_message_content(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, (dict, list)):
+            return json.dumps(content, ensure_ascii=False)
+        if content is None:
+            return ""
+        return str(content)
+
+    @staticmethod
+    def _build_openai_tool_defs(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [{"type": "function", "function": t} for t in tool_defs]
+
+    async def _invoke_dashscope_chat_completions(
+        self,
+        *,
+        used_model: str,
+        messages: List[Dict[str, str]],
+        tool_defs: List[Dict[str, Any]],
+        max_tokens: int,
+        parallel_tool_calls: bool,
+        sys_content: str,
+    ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": used_model,
             "messages": [{"role": "system", "content": sys_content}, *messages],
@@ -532,19 +548,12 @@ class LLMService:
             "max_tokens": max_tokens,
         }
 
-        # Ollama 本地模型可能不支持 tools / tool_choice，按需传入
-        if self.provider != "ollama":
-            payload["tools"] = [{"type": "function", "function": t} for t in tool_defs]
+        # tools=None 表示默认工具；tools=[] 表示显式禁用。
+        if tool_defs:
+            payload["tools"] = self._build_openai_tool_defs(tool_defs)
             payload["tool_choice"] = "auto"
             if parallel_tool_calls:
                 payload["parallel_tool_calls"] = True
-        else:
-            # Ollama 的 OpenAI 兼容模式部分支持 tools（取决于模型能力），尝试传入
-            try:
-                payload["tools"] = [{"type": "function", "function": t} for t in tool_defs]
-                payload["tool_choice"] = "auto"
-            except Exception:
-                pass
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -560,11 +569,117 @@ class LLMService:
         msg = choice.get("message") or {}
 
         return {
-            "text": msg.get("content") or "",
-            "toolCalls": msg.get("tool_calls") or [],
-            "model": used_model,
+            "text": self._stringify_message_content(msg.get("content")),
+            "toolCalls": OllamaClient._normalize_tool_calls(msg.get("tool_calls")),
+            "model": str(data.get("model") or used_model),
             "usage": data.get("usage"),
+            "raw": data,
+            "provider": "dashscope",
         }
+
+    async def _invoke_ollama_api_chat(
+        self,
+        *,
+        used_model: str,
+        messages: List[Dict[str, str]],
+        tool_defs: List[Dict[str, Any]],
+        max_tokens: int,
+        sys_content: str,
+        response_schema: Optional[Dict[str, Any]],
+        output_mode: str,
+    ) -> Dict[str, Any]:
+        if not self.ollama_client:
+            raise RuntimeError("Ollama client 未初始化")
+
+        if output_mode == "schema_json" and not response_schema:
+            raise ValueError("output_mode=schema_json 时必须提供 response_schema")
+
+        ollama_format: Optional[Any] = None
+        if output_mode == "json":
+            ollama_format = "json"
+        elif output_mode == "schema_json":
+            ollama_format = response_schema
+
+        # 与原有 max_tokens 语义对齐到 Ollama 的 num_predict。
+        options: Dict[str, Any] = {
+            "temperature": 0.7,
+            "num_predict": int(max_tokens),
+        }
+
+        result = await self.ollama_client.chat(
+            model=used_model,
+            messages=[{"role": "system", "content": sys_content}, *messages],
+            stream=False,
+            keep_alive="10m",
+            options=options,
+            tools=self._build_openai_tool_defs(tool_defs) if tool_defs else None,
+            response_format=ollama_format,
+        )
+
+        raw_usage = None
+        if isinstance(result.raw, dict):
+            prompt_eval_count = result.raw.get("prompt_eval_count")
+            eval_count = result.raw.get("eval_count")
+            if prompt_eval_count is not None or eval_count is not None:
+                raw_usage = {
+                    "prompt_tokens": prompt_eval_count,
+                    "completion_tokens": eval_count,
+                    "total_tokens": (prompt_eval_count or 0) + (eval_count or 0),
+                }
+
+        return {
+            "text": result.content,
+            "toolCalls": result.tool_calls,
+            "model": result.model or used_model,
+            "usage": raw_usage,
+            "raw": result.raw,
+            "provider": "ollama",
+            "providerMeta": {
+                "done": result.done,
+                "doneReason": result.done_reason,
+                "format": ollama_format,
+            },
+        }
+
+    async def invoke_llm(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        model: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        max_tokens: int = 512,
+        parallel_tool_calls: bool = False,
+        memory_context: str = "",
+        response_schema: Optional[Dict[str, Any]] = None,
+        output_mode: str = "text",
+    ) -> Dict[str, Any]:
+        if self.stub_enabled:
+            return self._invoke_llm_stub(messages)
+
+        used_model = model or self.model_default
+        # tools=None 表示使用默认工具；tools=[] 表示显式禁用工具（例如让模型只总结工具结果）。
+        tool_defs = self.function_definitions if tools is None else tools
+        sys_content = self._build_system_content(memory_context=memory_context)
+
+        if self.provider == "ollama":
+            return await self._invoke_ollama_api_chat(
+                used_model=used_model,
+                messages=messages,
+                tool_defs=tool_defs,
+                max_tokens=max_tokens,
+                sys_content=sys_content,
+                response_schema=response_schema,
+                output_mode=output_mode,
+            )
+
+        return await self._invoke_dashscope_chat_completions(
+            used_model=used_model,
+            messages=messages,
+            tool_defs=tool_defs,
+            max_tokens=max_tokens,
+            parallel_tool_calls=parallel_tool_calls,
+            sys_content=sys_content,
+        )
 
     @staticmethod
     def extract_say_text(raw_text: str) -> str:

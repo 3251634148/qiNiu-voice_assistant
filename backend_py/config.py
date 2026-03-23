@@ -57,7 +57,7 @@ class Settings:
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").strip()
         self.ollama_model = os.getenv(
             "OLLAMA_MODEL",
-            "wangshenzhi/llama3-8b-chinese-chat-ollama-q4",
+            "qwen3.5",
         ).strip()
 
         # 全局热键唤醒语音接收

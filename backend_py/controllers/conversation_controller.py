@@ -823,6 +823,35 @@ class ConversationController:
         name = fn.get("name") if isinstance(fn, dict) else tool_call.get("name")
         return name if isinstance(name, str) and name.strip() else None
 
+    def _build_assistant_tool_call_message(self, *, content: str, tool_calls: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """构造带 tool_calls 的 assistant 消息。
+
+        目前 DashScope/OpenAI 兼容接口与 Ollama 原生 `/api/chat` 都接受该形态，
+        因此这里保持统一，避免把 provider 分支扩散到业务逻辑里。
+        """
+
+        return {
+            "role": "assistant",
+            "content": str(content or ""),
+            "tool_calls": tool_calls,
+        }
+
+    def _build_tool_result_message(self, *, tool_call_id: str, tool_name: str, content: str) -> Dict[str, Any]:
+        """按 provider 生成 tool-loop 的工具结果消息。"""
+
+        if self.llm_service.provider == "ollama":
+            return {
+                "role": "tool",
+                "tool_name": str(tool_name or ""),
+                "content": str(content or ""),
+            }
+
+        return {
+            "role": "tool",
+            "tool_call_id": str(tool_call_id or ""),
+            "content": str(content or ""),
+        }
+
     async def _maybe_run_network_tool_loop(
         self,
         *,
@@ -905,11 +934,10 @@ class ConversationController:
 
             # 把 assistant 的 tool_calls 追加到 messages（用于下一轮回填）。
             loop_messages.append(
-                {
-                    "role": "assistant",
-                    "content": current.get("text") or "",
-                    "tool_calls": tool_calls,
-                }
+                self._build_assistant_tool_call_message(
+                    content=current.get("text") or "",
+                    tool_calls=tool_calls,
+                )
             )
 
             async def _exec_device_location(tc: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
@@ -1302,11 +1330,11 @@ class ConversationController:
 
             for tool_call_id, content, meta in results:
                 loop_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": str(content or ""),
-                    }
+                    self._build_tool_result_message(
+                        tool_call_id=tool_call_id,
+                        tool_name=str(meta.get("tool") or ""),
+                        content=str(content or ""),
+                    )
                 )
 
                 any_failed = any_failed or (not bool(meta.get("ok")))
@@ -1380,20 +1408,19 @@ class ConversationController:
                 )
 
                 loop_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [fallback_call],
-                    }
+                    self._build_assistant_tool_call_message(
+                        content="",
+                        tool_calls=[fallback_call],
+                    )
                 )
 
                 fb_id, fb_content, _fb_meta = await _exec_network(fallback_call)
                 loop_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": fb_id,
-                        "content": str(fb_content or ""),
-                    }
+                    self._build_tool_result_message(
+                        tool_call_id=fb_id,
+                        tool_name="web_search",
+                        content=str(fb_content or ""),
+                    )
                 )
 
                 loop_messages.append(
@@ -1871,6 +1898,7 @@ class ConversationController:
                 pref_resp = await self.llm_service.invoke_llm(
                     pref_msgs,
                     max_tokens=400,
+                    output_mode="json" if self.llm_service.provider == "ollama" else "text",
                 )
                 pref_text = str(pref_resp.get("text") or "").strip()
                 if pref_text:

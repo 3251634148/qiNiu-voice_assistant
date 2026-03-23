@@ -84,8 +84,10 @@ async def _run() -> int:
     payload: Dict[str, Any] = {
         "runId": str(os.environ.get("VOICE_ASSISTANT_DEBUG_RUN") or "").strip(),
         "baseUrl": base_url,
+        "normalizedBaseUrl": client.base_url,
         "model": model,
         "content": str(result.content or ""),
+        "toolCalls": result.tool_calls,
         "raw": result.raw,
     }
 
@@ -94,10 +96,14 @@ async def _run() -> int:
 
     print(f"[smoke] runId={payload['runId']}")
     print(f"[smoke] baseUrl={base_url}")
+    print(f"[smoke] normalizedBaseUrl={client.base_url}")
     print(f"[smoke] model={model}")
     print(f"[smoke] out={out_path}")
     print("\n[smoke] content:")
     print(str(result.content or "").strip())
+    if result.tool_calls:
+        print("\n[smoke] toolCalls:")
+        print(json.dumps(result.tool_calls, ensure_ascii=False, indent=2))
 
     return 0
 
