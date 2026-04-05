@@ -77,6 +77,30 @@ def test_pick_child_window_from_infos_prefers_popup_in_parent() -> None:
     assert float(bounds.width * bounds.height) < parent_area * 0.70
 
 
+def test_pick_child_window_excludes_bound_main_window_id() -> None:
+    from backend_py.services.macos_ui_automation import MacOSUIAutomation
+
+    # 回归：真实 badcase 中 parent 是更大的企微窗口，而“被绑定的主窗口”尺寸较小、
+    # 又刚好落在 parent 内部；若不显式排除该 windowId，会把主窗口误认成搜索弹窗。
+    parent_bounds = {"x": 430, "y": 218, "width": 1701, "height": 938}
+    windows = [
+        _win(owner="企业微信", wid=1632, x=704, y=320, w=1152, h=801),
+        _win(owner="企业微信", wid=200, x=980, y=360, w=620, h=420),
+    ]
+
+    picked = MacOSUIAutomation._pick_child_window_from_infos(  # noqa: SLF001
+        windows=windows,
+        owner_names=["企业微信", "WeCom"],
+        parent_bounds=parent_bounds,
+        min_area_ratio=0.02,
+        max_area_ratio=0.70,
+        exclude_window_ids=[1632],
+    )
+    assert picked is not None
+    wid, _, _ = picked
+    assert wid == 200
+
+
 def test_pick_child_window_returns_none_when_parent_invalid() -> None:
     from backend_py.services.macos_ui_automation import MacOSUIAutomation
 

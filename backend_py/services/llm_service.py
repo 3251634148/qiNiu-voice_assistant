@@ -33,8 +33,14 @@ class LLMService:
             self.base_url = settings.ollama_base_url
             self.api_key = "ollama"  # Ollama 不需要真实 key，但 HTTP 头需要非空值
             self.model_default = settings.ollama_model
-            self.ollama_client = OllamaClient(base_url=self.base_url, timeout_sec=60.0)
-            logger.info("LLM 后端: Ollama (base_url=%s, model=%s)", self.base_url, self.model_default)
+            self.ollama_timeout_sec = float(getattr(settings, "ollama_timeout_sec", 300.0) or 300.0)
+            self.ollama_client = OllamaClient(base_url=self.base_url, timeout_sec=self.ollama_timeout_sec)
+            logger.info(
+                "LLM 后端: Ollama (base_url=%s, model=%s, timeoutSec=%.1f)",
+                self.base_url,
+                self.model_default,
+                self.ollama_timeout_sec,
+            )
         else:
             if not self.stub_enabled and not settings.dashscope_api_key:
                 raise RuntimeError("千问API密钥未配置，请设置DASHSCOPE_API_KEY环境变量")
@@ -609,7 +615,7 @@ class LLMService:
         result = await self.ollama_client.chat(
             model=used_model,
             messages=[{"role": "system", "content": sys_content}, *messages],
-            stream=False,
+            stream=True,
             keep_alive="10m",
             options=options,
             tools=self._build_openai_tool_defs(tool_defs) if tool_defs else None,
@@ -629,6 +635,7 @@ class LLMService:
 
         return {
             "text": result.content,
+            "thinking": result.thinking,
             "toolCalls": result.tool_calls,
             "model": result.model or used_model,
             "usage": raw_usage,
@@ -638,6 +645,11 @@ class LLMService:
                 "done": result.done,
                 "doneReason": result.done_reason,
                 "format": ollama_format,
+                "stream": bool(result.stream),
+                "timeoutSec": float(getattr(self, "ollama_timeout_sec", 300.0)),
+                "firstChunkMs": result.first_chunk_ms,
+                "durationMs": result.duration_ms,
+                "thinkingChars": len(str(result.thinking or "")),
             },
         }
 

@@ -1,3 +1,85 @@
+## 2026-04-02（企微窗口绑定修复：避免多窗口场景下验证看错窗口）
+
+### 🔧 问题修复
+- 修复企业微信 `wecom_ui` 在多窗口场景下，主流程截图/标题 OCR 验证可能反复抓到错误企微窗口（如图片窗口、其他企微主窗），导致“明明已经进入目标联系人会话却仍被判定失败”的问题。
+- `wecom_ui` 在窗口归一化后会立即按目标 `bounds` 绑定同一个主窗口引用；后续聊天列表探测、全局搜索后的标题校验、发送前焦点确认都统一基于该 `windowId` 截图，不再每一步按 owner 名重新猜窗口。
+- 全局搜索弹窗截取新增排除已绑定主窗口 `windowId` 的能力，并过滤掉与主窗口近似同尺寸的候选，避免把主窗口自己误识别成“搜索弹窗”。
+- 保持既有交互策略不变：继续保留点击“联系人”tab、搜索结果缺失时清空并重输联系人名刷新、以及最终聊天标题 OCR 安全护栏。
+
+### 🧪 测试
+- `cd /Users/westar/Desktop/code/voice_assistant && source backend_py/.venv/bin/activate && python -m pytest test_scripts/test_macos_ui_automation_popup_pick.py test_scripts/test_wecom_ui_controller_pick_and_noise.py -q`
+- 结果：`7 passed`
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/services/macos_ui_automation.py` | 新增按期望 bounds 绑定窗口、按 `windowId` 截图能力；弹窗选择支持排除已绑定主窗口 |
+| `backend_py/services/wecom_ui_controller.py` | 企微发送流程改为绑定主窗口后再做截图/OCR/验证，保留联系人 tab 与刷新逻辑 |
+| `test_scripts/test_macos_ui_automation_popup_pick.py` | 新增“排除已绑定主窗口 ID”回归用例 |
+| `docs/CHANGELOG.md` | 记录本次修复 |
+
+---
+
+## 2026-04-01（企微全局搜索更稳：联系人 tab + Enter 选第一条 + 保留刷新）
+
+### 🔧 问题修复
+- 修复企业微信 `wecom_ui` 全局搜索弹窗在“结果列表点击”场景下，可能因水印/详情文本框干扰导致点击落空、无法进入目标会话的问题。
+- 新策略：输入联系人名后尽力切到“联系人”tab，并使用 `Enter` 选择第一条最匹配结果进入会话；当搜索结果偶发不渲染时，保留“清空并重输”刷新一次的逻辑。
+- 安全护栏不变：仍以聊天标题区 OCR 命中目标联系人为最终判定，否则中止发送以避免误发。
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/services/wecom_ui_controller.py` | 全局搜索：改为“联系人 tab + Enter 选第一条”，并保留清空重输刷新 |
+| `docs/CHANGELOG.md` | 记录本次修复 |
+
+---
+
+## 2026-03-27（修复语音 E2E 卡住超时：Socket.IO 包体上限 + 脚本 fail-fast）
+
+### 🔧 问题修复
+- 修复语音 E2E 发送较大音频（尤其 `m4a → wav` 膨胀）可能触发 Socket.IO 默认包体上限导致服务端断开、脚本“假卡死直到超时”的问题。
+- E2E/benchmark 脚本在 `disconnect`/后端 `error` 时会立刻退出，并仍然落盘 `voice_flow_timeline.json` / `voice_perf_benchmark.json` 作为证据链。
+
+### ✨ 新功能
+- 在真实工作流中落盘性能复盘：每次请求会生成 `ui_debug/<requestId>/perf_summary.json`，记录 ASR/LLM/工具/TTS 的关键耗时与少量元信息（不落盘敏感明文）。
+
+### 🔧 兼容性增强
+- 后端 Socket.IO 提升 `max_http_buffer_size` 到 16MB，避免语音 bytes 上送被误伤。
+- E2E/benchmark 默认不再强制将 `m4a/mp4` 转 `wav`（可用参数显式开启转码），降低体积膨胀与触发上限/ASR 大小限制的概率。
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/main.py` | Socket.IO：设置 `max_http_buffer_size=16MB` |
+| `backend_py/services/perf_recorder.py` | 新增：请求级性能记录器，固定落盘 `perf_summary.json` |
+| `backend_py/controllers/conversation_controller.py` | 集成 ASR/LLM/工具/TTS 性能打点与落盘 |
+| `test_scripts/test_e2e_socketio_voice_flow.py` | E2E：fail-fast 与音频转码策略优化 |
+| `test_scripts/test_voice_perf_benchmark.py` | benchmark：转码策略与失败落盘增强 |
+| `docs/CHANGELOG.md` | 记录本次修复 |
+
+---
+
+## 2026-03-25（语音 E2E + m4a 输入 + DashScope/Ollama 对照基准）
+
+### ✨ 新功能
+- 新增语音端到端 E2E 脚本：支持本地音频文件（含 `m4a`）通过 Socket.IO 走 `voice-input` → ASR → LLM →（可选工具）→ TTS，并落盘事件时间线 JSON。
+- 新增性能基准脚本：输出 ASR/LLM/TTS 的延迟统计，并支持 DashScope 与 Ollama 的 LLM 对照实验。
+
+### 🔧 兼容性增强
+- `ASRService` 增强音频头识别：支持 `m4a/mp4` 的 MIME 推断与 `input_audio.format` 映射。
+
+### 📝 修改的文件
+| 文件 | 修改内容 |
+|------|----------|
+| `backend_py/services/asr_service.py` | 补齐 `m4a/mp4` MIME 探测与 format 映射 |
+| `test_scripts/test_e2e_socketio_voice_flow.py` | 新增：语音 E2E（本地音频→Socket.IO→全链路） |
+| `test_scripts/test_voice_perf_benchmark.py` | 新增：ASR/LLM/TTS 性能基准与 provider 对照 |
+| `temp_md/2026-03-25_voice_e2e_and_benchmark.md` | 新增：测试与论文数据产出说明 |
+| `docs/CHANGELOG.md` | 记录本次变更 |
+
+---
+
 ## 2026-03-13（Ollama 适配增强 — provider 分层 / 原生 /api/chat / tool-loop 回填兼容）
 
 ### 🔧 问题修复

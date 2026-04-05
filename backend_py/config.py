@@ -57,8 +57,12 @@ class Settings:
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").strip()
         self.ollama_model = os.getenv(
             "OLLAMA_MODEL",
-            "qwen3.5",
+            "qwen3.5:9b",
         ).strip()
+        try:
+            self.ollama_timeout_sec = float(os.getenv("OLLAMA_TIMEOUT_SEC", "300") or 300)
+        except Exception:
+            self.ollama_timeout_sec = 300.0
 
         # 全局热键唤醒语音接收
         # 热键格式兼容 pynput：例如 "<cmd>+<shift>+<space>"

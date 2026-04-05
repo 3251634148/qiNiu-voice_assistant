@@ -50,12 +50,14 @@ class TestLLMProviderConfig:
             "LLM_PROVIDER": "ollama",
             "OLLAMA_BASE_URL": "http://127.0.0.1:11434/v1",
             "OLLAMA_MODEL": "test-model",
+            "OLLAMA_TIMEOUT_SEC": "180",
         }
         with patch.dict(os.environ, env, clear=False):
             s = Settings()
             assert s.llm_provider == "ollama"
             assert s.ollama_base_url == "http://127.0.0.1:11434/v1"
             assert s.ollama_model == "test-model"
+            assert s.ollama_timeout_sec == 180.0
 
     def test_llm_service_ollama_init(self) -> None:
         """LLMService 在 Ollama 模式下应正确初始化。"""

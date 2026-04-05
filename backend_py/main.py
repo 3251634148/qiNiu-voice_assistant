@@ -18,12 +18,16 @@ setup_logging()
 logger = logging.getLogger("backend_py")
 
 
+# 说明：语音 `voice-input` 会携带二进制音频 bytes。
+# 默认 `max_http_buffer_size` 约 1MB，真实语音（尤其 wav）很容易超过并导致服务端直接断开连接。
+# 这里将上限提升到 16MB，避免 E2E / 本地客户端被误伤；同时上游 ASR 仍会有单次音频大小限制兜底。
 sio = socketio.AsyncServer(
     async_mode="asgi",
     cors_allowed_origins="*",
     ping_timeout=60,
     ping_interval=25,
     allow_upgrades=True,
+    max_http_buffer_size=16 * 1024 * 1024,
 )
 
 controller = ConversationController(sio=sio)

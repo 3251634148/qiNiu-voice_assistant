@@ -38,6 +38,84 @@ def test_ollama_client_normalizes_root_base_url() -> None:
 
 
 @pytest.mark.anyio
+async def test_ollama_client_streaming_accumulates_chunks_and_uses_timeout(monkeypatch: Any) -> None:
+    import backend_py.services.ollama_client as ollama_mod
+    from backend_py.services.ollama_client import OllamaClient
+
+    captured: Dict[str, Any] = {}
+
+    class _FakeStreamResponse:
+        status_code = 200
+
+        async def __aenter__(self) -> "_FakeStreamResponse":
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        async def aread(self) -> bytes:
+            return b""
+
+        async def aiter_lines(self):
+            lines = [
+                json.dumps({"model": "qwen3.5:9b", "message": {"thinking": "先", "content": ""}, "done": False}, ensure_ascii=False),
+                json.dumps({"model": "qwen3.5:9b", "message": {"thinking": "想", "content": "好"}, "done": False}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "model": "qwen3.5:9b",
+                        "message": {
+                            "content": "的",
+                            "tool_calls": [{"function": {"name": "get_current_time", "arguments": {"tz": "Asia/Shanghai"}}}],
+                        },
+                        "done": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps({"model": "qwen3.5:9b", "done": True, "done_reason": "stop", "prompt_eval_count": 10, "eval_count": 5}, ensure_ascii=False),
+            ]
+            for line in lines:
+                yield line
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        def stream(self, method: str, url: str, json: Dict[str, Any]) -> _FakeStreamResponse:
+            captured["method"] = method
+            captured["url"] = url
+            captured["payload"] = json
+            return _FakeStreamResponse()
+
+    monkeypatch.setattr(ollama_mod.httpx, "AsyncClient", _FakeAsyncClient)
+
+    client = OllamaClient(base_url="http://127.0.0.1:11434/v1", timeout_sec=123)
+    result = await client.chat(
+        model="qwen3.5:9b",
+        messages=[{"role": "user", "content": "现在几点"}],
+        stream=True,
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://127.0.0.1:11434/api/chat"
+    assert captured["payload"]["stream"] is True
+    assert captured["timeout"].read == 123
+    assert result.stream is True
+    assert result.thinking == "先想"
+    assert result.content == "好的"
+    assert result.tool_calls[0]["function"]["name"] == "get_current_time"
+    assert result.tool_calls[0]["function"]["arguments"] == '{"tz": "Asia/Shanghai"}'
+    assert result.done is True
+    assert result.done_reason == "stop"
+    assert result.duration_ms is not None
+
+
+@pytest.mark.anyio
 async def test_llm_service_ollama_uses_native_chat_and_json_format(monkeypatch: Any) -> None:
     from backend_py.config import settings
     from backend_py.services.llm_service import LLMService
@@ -46,6 +124,7 @@ async def test_llm_service_ollama_uses_native_chat_and_json_format(monkeypatch: 
     monkeypatch.setattr(settings, "llm_provider", "ollama")
     monkeypatch.setattr(settings, "ollama_base_url", "http://127.0.0.1:11434/v1")
     monkeypatch.setattr(settings, "ollama_model", "qwen3.5:9b")
+    monkeypatch.setattr(settings, "ollama_timeout_sec", 180.0)
 
     service = LLMService()
     captured: Dict[str, Any] = {}
@@ -65,6 +144,10 @@ async def test_llm_service_ollama_uses_native_chat_and_json_format(monkeypatch: 
             done=True,
             done_reason="stop",
             raw={"prompt_eval_count": 12, "eval_count": 8},
+            thinking="先思考一下",
+            stream=True,
+            first_chunk_ms=45,
+            duration_ms=320,
         )
 
     assert service.ollama_client is not None
@@ -85,9 +168,13 @@ async def test_llm_service_ollama_uses_native_chat_and_json_format(monkeypatch: 
     assert captured["response_format"] == "json"
     assert captured["messages"][0]["role"] == "system"
     assert captured["tools"][0]["function"]["name"] == "get_current_time"
+    assert captured["stream"] is True
     assert response["provider"] == "ollama"
+    assert response["thinking"] == "先思考一下"
     assert response["toolCalls"][0]["function"]["arguments"] == "{}"
     assert response["usage"]["total_tokens"] == 20
+    assert response["providerMeta"]["stream"] is True
+    assert response["providerMeta"]["timeoutSec"] == 180.0
 
 
 @pytest.mark.anyio

@@ -264,8 +264,19 @@ class WeComUIController:
                 center_main_screen=True,
             )
             debug_info["windowNormalize"] = norm
+            main_window_ref = await self.ui.resolve_window_ref_by_expected_bounds(
+                owner_names=WECOM_APP_NAMES,
+                expected_bounds={
+                    "x": norm.get("x"),
+                    "y": norm.get("y"),
+                    "width": norm.get("width"),
+                    "height": norm.get("height"),
+                },
+                tolerance_px=36.0,
+            )
+            debug_info["mainWindowRef"] = main_window_ref
         except Exception as e:
-            raise RuntimeError(f"企业微信窗口归一化失败：{e}")
+            raise RuntimeError(f"企业微信窗口归一化/绑定失败：{e}")
 
         await asyncio.sleep(0.20)
 
@@ -285,6 +296,7 @@ class WeComUIController:
                 dry_run=dry_run,
                 debug=debug,
                 debug_info=debug_info,
+                main_window_ref=main_window_ref,
                 _dump_json_once=_dump_json_once,
             )
         except Exception:
@@ -300,6 +312,7 @@ class WeComUIController:
         dry_run: bool,
         debug: bool,
         debug_info: Dict[str, Any],
+        main_window_ref: Dict[str, Any],
         _dump_json_once: Any,
     ) -> Dict[str, Any]:
 
@@ -348,6 +361,20 @@ class WeComUIController:
                 grayscale=True,
                 accurate=False,
                 custom_words=list(custom_words),
+            )
+
+        main_window_id = int(main_window_ref.get("windowId") or 0)
+        main_window_bounds = dict(main_window_ref.get("windowBounds") or {})
+        main_window_owner = str(main_window_ref.get("ownerName") or "")
+        if main_window_id <= 0 or not main_window_bounds:
+            raise RuntimeError(f"主窗口绑定信息无效：{main_window_ref}")
+
+        async def _capture_main_window(tag: str) -> Dict[str, Any]:
+            return await self.ui.screenshot_window_by_id(
+                window_id=main_window_id,
+                owner_name=main_window_owner,
+                window_bounds=main_window_bounds,
+                tag=tag,
             )
 
         def _to_screen(cap: Dict[str, Any], *, image_x: float, image_y: float) -> tuple[float, float]:
@@ -441,7 +468,7 @@ class WeComUIController:
             return best_box
 
         async def _verify_chat_header_or_raise() -> None:
-            cap_hdr = await self.ui.screenshot_window(owner_names=WECOM_APP_NAMES, tag="wecom_chat_header_verify")
+            cap_hdr = await _capture_main_window("wecom_chat_header_verify")
             debug_info.setdefault("captures", []).append({"step": "chat_header_verify", "capture": cap_hdr})
 
             hdr_boxes = await _ocr(cap_hdr, roi=rois["chat_header"], custom_words=[contact])
@@ -484,10 +511,7 @@ class WeComUIController:
 
                     # 尝试从左侧会话列表再点一次（有时搜索结果点击未真正进入会话）
                     if attempt in {1, 3, 5}:
-                        cap_retry = await self.ui.screenshot_window(
-                            owner_names=WECOM_APP_NAMES,
-                            tag=f"wecom_chat_reopen_retry_{attempt}",
-                        )
+                        cap_retry = await _capture_main_window(f"wecom_chat_reopen_retry_{attempt}")
                         debug_info.setdefault("captures", []).append(
                             {"step": f"chat_reopen_retry_{attempt}", "capture": cap_retry}
                         )
@@ -515,7 +539,7 @@ class WeComUIController:
             raise RuntimeError(f"{last_error or '当前会话标题未命中目标联系人'}（已重试 {max_attempts} 次）")
 
         # 记录初始截图
-        cap0 = await self.ui.screenshot_window(owner_names=WECOM_APP_NAMES, tag="wecom_flow_init")
+        cap0 = await _capture_main_window("wecom_flow_init")
         debug_info.setdefault("captures", []).append({"step": "init", "capture": cap0})
 
         # 1) 进入"消息"页
@@ -527,14 +551,14 @@ class WeComUIController:
             # Cmd+1 已完成消息 tab 切换，无需再 OCR+点击"消息"按钮（冗余点击会触发聊天列表刷新/滚动）
             await asyncio.sleep(0.35)
 
-        cap1 = await self.ui.screenshot_window(owner_names=WECOM_APP_NAMES, tag="wecom_after_go_messages")
+        cap1 = await _capture_main_window("wecom_after_go_messages")
         debug_info.setdefault("captures", []).append({"step": "after_go_messages", "capture": cap1})
 
         # 2) 优先左侧会话列表直达
         opened_chat = False
         opened_by = ""
 
-        cap_list = await self.ui.screenshot_window(owner_names=WECOM_APP_NAMES, tag="wecom_chat_list_probe")
+        cap_list = await _capture_main_window("wecom_chat_list_probe")
         debug_info.setdefault("captures", []).append({"step": "chat_list_probe", "capture": cap_list})
 
         list_boxes = await _ocr(cap_list, roi=rois["chat_list"], custom_words=[contact])
@@ -575,7 +599,7 @@ class WeComUIController:
 
         # dry-run：只采集证据与决策，不做任何点击/键入；避免因 UI 版本差异导致抛错
         if dry_run:
-            cap_plan = await self.ui.screenshot_window(owner_names=WECOM_APP_NAMES, tag="wecom_dry_run_plan")
+            cap_plan = await _capture_main_window("wecom_dry_run_plan")
             debug_info.setdefault("captures", []).append({"step": "dry_run_plan", "capture": cap_plan})
 
             search_boxes = await _ocr(cap_plan, roi=rois["search_popup"], custom_words=["搜索", contact])
@@ -592,14 +616,12 @@ class WeComUIController:
                 "debug": debug_info if debug else None,
             }
 
-        # 3) Shift+Cmd+F 全局搜索弹窗兜底 —— 纯键盘导航策略
-        # 原因：screenshot_window 按面积选最大窗口（主窗口），无法截取全局搜索弹窗（独立小窗口），
-        # 因此放弃"截图+OCR 在弹窗中操作"，改为纯键盘：输入 → 等待 → Return 选中第一个结果。
+        # 3) Shift+Cmd+F 全局搜索弹窗兜底
+        # 说明：
+        # - 主窗口截图/验证已绑定到 normalize 后的同一 windowId，避免多窗口场景下看错窗口；
+        # - 弹窗路径仍保留“点击联系人 tab + Enter 第一条 + 标题校验护栏”；
+        # - 若弹窗窗口无法截取，则回退到键盘 Enter 方案，但最终仍以主窗口标题区校验为准。
         if not opened_chat:
-            # 说明：
-            # - 旧实现采用“纯键盘 Return 选第一条综合结果”，当第一条是群聊时会进入错误会话并触发护栏中止。
-            # - 新实现：截取全局搜索弹窗窗口 -> 在严格 ROI 内点击“联系人”tab -> 在结果列表中点联系人。
-            # - 若弹窗窗口无法截取（Quartz 枚举不到），则回退到旧键盘策略（仍会做标题校验护栏，避免误发）。
             for attempt in range(3):
                 # A. 先用 Escape 关闭可能残留的弹窗/面板（key_code 53 = Escape 键码）
                 await self.ui.key_code(53)
@@ -627,71 +649,76 @@ class WeComUIController:
 
                 debug_info["globalSearchKeyboard"][-1]["step"] = "input_done"
 
-                # D. 尝试截取全局搜索弹窗窗口，并点击“联系人”tab
-                cap_parent = cap1  # 主窗口 bounds 用于筛选“位于主窗口内部”的弹窗窗口
+                # D. 尝试截取全局搜索弹窗窗口，并点击“联系人”tab（best-effort）
+                # 新策略：不再在结果列表上做鼠标点击（易被水印/详情文本框干扰），改为：
+                # - 输入联系人名
+                # - 尽力切到“联系人”tab
+                # - 直接按 Enter 选择第一条最匹配结果
+                # - 仍以 chat_header 强校验作为最终护栏（防误发）
                 popup_opened = False
                 clicked_contacts = False
-                clicked_result = False
+                pressed_return = False
+                refreshed_search = False
                 popup_attempts: list[dict[str, Any]] = []
-                contacts_tab_selected = False
 
-                for popup_try in range(2):
-                    try:
-                        cap_popup = await self.ui.screenshot_window_child_in_parent(
-                            owner_names=WECOM_APP_NAMES,
-                            parent_window_bounds=cap_parent.get("windowBounds") or {},
-                            tag=f"wecom_global_search_popup_{attempt}_{popup_try}",
+                # 先尝试截取弹窗并切到“联系人”tab（只做一次，失败不阻断，按你的 B 规则允许走“全部 tab + Enter”）
+                cap_popup: Optional[Dict[str, Any]] = None
+                try:
+                    cap_popup = await self.ui.screenshot_window_child_in_parent(
+                        owner_names=WECOM_APP_NAMES,
+                        parent_window_bounds=main_window_bounds,
+                        exclude_window_ids=[main_window_id],
+                        tag=f"wecom_global_search_popup_{attempt}_0",
+                    )
+                    debug_info.setdefault("captures", []).append(
+                        {"step": f"global_search_popup_{attempt}_0", "capture": cap_popup}
+                    )
+                    popup_opened = True
+                    popup_attempts.append({"try": 0})
+
+                    tab_boxes = await _ocr(
+                        cap_popup,
+                        roi=popup_rois["tabs"],
+                        custom_words=["联系人", "全部", "群聊", "聊天记录"],
+                    )
+                    popup_attempts[-1]["tabsPreview"] = [
+                        str(getattr(b, "text", "") or "") for b in tab_boxes[:12]
+                    ]
+
+                    tab_box = _pick_tab_box(tab_boxes, label="联系人")
+                    popup_attempts[-1]["tabPick"] = str(getattr(tab_box, "text", "") or "") if tab_box else None
+                    if tab_box is not None:
+                        await _click_box_center(
+                            cap_popup,
+                            tab_box,
+                            step=f"popup_click_contacts_tab_{attempt}",
                         )
-                        debug_info.setdefault("captures", []).append(
-                            {"step": f"global_search_popup_{attempt}_{popup_try}", "capture": cap_popup}
-                        )
-                        popup_opened = True
+                        clicked_contacts = True
+                        await asyncio.sleep(0.35)
+                except Exception as e:
+                    popup_attempts.append({"try": 0, "error": str(e)})
+                    await asyncio.sleep(0.15)
 
-                        popup_attempts.append({"try": int(popup_try)})
+                # E. 结果可能偶发不渲染：保留“清空并重输”刷新逻辑（最多 1 次刷新）
+                # - 若能截到弹窗：用 OCR 观察 results ROI 是否出现“非噪声文本”来判定是否有结果
+                # - 若截不到弹窗：无法判断是否有结果，按 B 规则仍可直接 Enter 尝试选择第一条
+                meaningful = False
+                cap_popup2: Optional[Dict[str, Any]] = None
+                result_boxes: list[Any] = []
 
-                        # B：重试时不要重复点击“联系人”tab（企微可能会刷新/清空当前结果）。
-                        # 仅在本 attempt 第一次进入弹窗时尝试切到联系人。
-                        if not contacts_tab_selected:
-                            tab_boxes = await _ocr(
-                                cap_popup,
-                                roi=popup_rois["tabs"],
-                                custom_words=["联系人", "全部", "群聊", "聊天记录"],
-                            )
-                            popup_attempts[-1]["tabsPreview"] = [
-                                str(getattr(b, "text", "") or "") for b in tab_boxes[:12]
-                            ]
-
-                            tab_box = _pick_tab_box(tab_boxes, label="联系人")
-                            popup_attempts[-1]["tabPick"] = (
-                                str(getattr(tab_box, "text", "") or "") if tab_box else None
-                            )
-                            if tab_box is not None:
-                                await _click_box_center(
-                                    cap_popup,
-                                    tab_box,
-                                    step=f"popup_click_contacts_tab_{attempt}_{popup_try}",
-                                )
-                                clicked_contacts = True
-                                contacts_tab_selected = True
-                                await asyncio.sleep(0.35)
-                            else:
-                                # 如果 tabs OCR 都找不到联系人，则本轮不继续冒险点结果。
-                                await asyncio.sleep(0.20)
-                                continue
-
-                        # C：结果可能需要一点时间稳定渲染。这里做有限轮询（不会无限等待）。
+                if popup_opened and cap_popup is not None:
+                    for refresh_round in range(2):
                         poll_delays = [0.20, 0.35, 0.55, 0.80]
-                        cap_popup2 = None
-                        result_boxes: list[Any] = []
                         for pi, delay in enumerate(poll_delays):
                             cap_popup2 = await self.ui.screenshot_window_child_in_parent(
                                 owner_names=WECOM_APP_NAMES,
-                                parent_window_bounds=cap_parent.get("windowBounds") or {},
-                                tag=f"wecom_global_search_popup_results_{attempt}_{popup_try}_{pi}",
+                                parent_window_bounds=main_window_bounds,
+                                exclude_window_ids=[main_window_id],
+                                tag=f"wecom_global_search_popup_results_{attempt}_{refresh_round}_{pi}",
                             )
                             debug_info.setdefault("captures", []).append(
                                 {
-                                    "step": f"global_search_popup_results_{attempt}_{popup_try}_{pi}",
+                                    "step": f"global_search_popup_results_{attempt}_{refresh_round}_{pi}",
                                     "capture": cap_popup2,
                                 }
                             )
@@ -702,43 +729,24 @@ class WeComUIController:
                                 custom_words=[contact],
                             )
                             preview = [str(getattr(b, "text", "") or "") for b in result_boxes[:14]]
-                            popup_attempts[-1][f"resultsPreview_{pi}"] = preview
+                            popup_attempts[-1][f"resultsPreview_{refresh_round}_{pi}"] = preview
 
-                            # 如果只读到空态提示，则继续等待（不视为有效结果）
-                            meaningful = False
-                            for s in preview:
-                                if not self._is_noise_text(s):
-                                    meaningful = True
-                                    break
+                            meaningful = any((not self._is_noise_text(s)) for s in preview)
                             if meaningful:
                                 break
 
                             await asyncio.sleep(delay)
 
-                        popup_attempts[-1]["resultsPreview"] = [
+                        popup_attempts[-1][f"resultsPreview_{refresh_round}"] = [
                             str(getattr(b, "text", "") or "") for b in result_boxes[:14]
                         ]
 
-                        pick = self._best_match_box(result_boxes, target=contact, min_conf=0.35)
-                        popup_attempts[-1]["resultPick"] = pick.__dict__ if pick else None
-                        if pick is None or pick.similarity < 0.78:
-                            # 方案 B（兜底）：如果结果区确实有 OCR 文本，但匹配阈值不达标，
-                            # 尝试点击“第一条结果”，随后仍会用 chat_header 护栏确认是否进入目标会话。
-                            fallback_box = _pick_first_result_box(result_boxes) if result_boxes else None
-                            popup_attempts[-1]["fallbackFirstBox"] = (
-                                str(getattr(fallback_box, "text", "") or "") if fallback_box else None
-                            )
-                            if fallback_box is not None and popup_try >= 1:
-                                await _click_box_center(
-                                    cap_popup2 or cap_popup,
-                                    fallback_box,
-                                    step=f"popup_click_first_result_fallback_{attempt}_{popup_try}",
-                                )
-                                clicked_result = True
-                                await asyncio.sleep(0.55)
-                                break
+                        if meaningful:
+                            break
 
-                            # 结果可能未加载出来：按你要求“清空并重试搜索”
+                        # 仍无结果：清空并重输，尝试刷新
+                        if refresh_round == 0:
+                            refreshed_search = True
                             try:
                                 await self.ui.hotkey("a", modifiers=["command down"])
                                 await self.ui.key_code(51)  # Delete
@@ -746,67 +754,47 @@ class WeComUIController:
                                 pbcopy(contact)
                                 await asyncio.sleep(0.03)
                                 await self.ui.hotkey("v", modifiers=["command down"])
-                                await asyncio.sleep(0.25)
+                                await asyncio.sleep(0.35)
                             except Exception as e:
                                 debug_info.setdefault("warnings", []).append(f"弹窗内重试搜索失败（忽略）：{e}")
-                            continue
-
-                        # 点击匹配到的联系人条目
-                        for b in result_boxes:
-                            txt = str(getattr(b, "text", "") or "").strip()
-                            if self._norm_text(txt) == self._norm_text(pick.text):
-                                await _click_box_center(
-                                    cap_popup2,
-                                    b,
-                                    step=f"popup_click_contact_result_{attempt}_{popup_try}",
-                                )
-                                clicked_result = True
-                                await asyncio.sleep(0.55)  # 等待会话切换
-                                break
-
-                        if clicked_result:
-                            break
-
-                    except Exception as e:
-                        popup_attempts.append({"try": int(popup_try), "error": str(e)})
-                        await asyncio.sleep(0.25)
 
                 debug_info.setdefault("globalSearchPopup", []).append(
                     {
                         "attempt": int(attempt),
                         "popupOpened": bool(popup_opened),
                         "clickedContactsTab": bool(clicked_contacts),
-                        "clickedResult": bool(clicked_result),
+                        "refreshedSearch": bool(refreshed_search),
+                        "meaningfulResults": bool(meaningful),
+                        "pressedReturn": bool(pressed_return),
                         "tries": popup_attempts,
                     }
                 )
 
-                if clicked_result:
-                    # E. 用 Escape 关闭可能残留的弹窗（确保焦点回到聊天区域）
+                # F. 选择第一条结果进入会话：
+                # - 若弹窗可见且结果有内容：Enter 选择第一条
+                # - 若弹窗不可截取：无法判断结果是否出现，仍按 B 规则 Enter 尝试
+                if (not popup_opened) or meaningful:
+                    await self.ui.key_code(36)  # Return
+                    pressed_return = True
+                    debug_info["globalSearchKeyboard"][-1]["step"] = "return_pressed"
+                    await asyncio.sleep(0.75)
+
+                    # 用 Escape 关闭弹窗（确保焦点回到主窗口）
                     await self.ui.key_code(53)  # Escape
                     await asyncio.sleep(0.25)
                     debug_info["globalSearchKeyboard"][-1]["step"] = "popup_closed"
                 else:
-                    # Fallback：若弹窗截取失败（popupOpened=False），才回退到旧键盘 Return 选第一条；
-                    # 若能截到弹窗但无法点到“联系人/结果”，继续下一轮 attempt（避免误点综合结果）。
-                    if not popup_opened:
-                        await self.ui.key_code(36)  # Return
-                        await asyncio.sleep(0.5)
-                        debug_info["globalSearchKeyboard"][-1]["step"] = "return_pressed_fallback"
-                        await self.ui.key_code(53)
-                        await asyncio.sleep(0.25)
-                        debug_info["globalSearchKeyboard"][-1]["step"] = "popup_closed"
-                    else:
-                        debug_info["globalSearchKeyboard"][-1]["step"] = "popup_click_failed"
-                        await asyncio.sleep(0.25)
-                        # 进入下一次 attempt 重试
-                        pass
+                    # 弹窗可见但结果仍未出现：进入下一轮 attempt 重试（避免 Enter 误选旧结果）
+                    debug_info["globalSearchKeyboard"][-1]["step"] = "no_results_skip_return"
+                    await asyncio.sleep(0.25)
+                    continue
 
-                # F. 截图验证：检查主窗口的聊天标题区是否已切换到目标联系人
-                cap_gs_verify = await self.ui.screenshot_window(
-                    owner_names=WECOM_APP_NAMES,
-                    tag=f"wecom_global_search_verify_{attempt}",
-                )
+                # 将 pressedReturn 写回 debug（在 append 后补写，避免重建结构）
+                debug_info["globalSearchPopup"][-1]["pressedReturn"] = bool(pressed_return)
+
+                # G. 截图验证：检查主窗口的聊天标题区是否已切换到目标联系人
+                # 这里做轻量验证用于决定是否继续下一轮 attempt；最终发送前仍会走 _verify_chat_header_with_retries()
+                cap_gs_verify = await _capture_main_window(f"wecom_global_search_verify_{attempt}")
                 debug_info.setdefault("captures", []).append(
                     {"step": f"global_search_verify_{attempt}", "capture": cap_gs_verify}
                 )
@@ -827,9 +815,7 @@ class WeComUIController:
                     break
 
                 hdr_pick = self._best_match_box(hdr_boxes, target=contact, min_conf=0.30)
-                debug_info["globalSearchKeyboard"][-1]["headerPick"] = (
-                    hdr_pick.__dict__ if hdr_pick else None
-                )
+                debug_info["globalSearchKeyboard"][-1]["headerPick"] = hdr_pick.__dict__ if hdr_pick else None
                 if hdr_pick is not None and hdr_pick.similarity >= 0.70:
                     opened_chat = True
                     opened_by = "global_search_keyboard"
@@ -837,8 +823,7 @@ class WeComUIController:
                     break
 
                 debug_info["globalSearchKeyboard"][-1]["verified"] = False
-                # 重试前等待
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.35)
 
         debug_info["openedChat"] = {"ok": bool(opened_chat), "by": opened_by}
         if not opened_chat:
@@ -852,9 +837,7 @@ class WeComUIController:
             return {"message": f"(dry-run) 将给 {contact} 发送消息", "debug": debug_info if debug else None}
 
         # 5) 发送消息前：点击聊天输入区域确保焦点不在搜索框
-        cap_before_send = await self.ui.screenshot_window(
-            owner_names=WECOM_APP_NAMES, tag="wecom_before_send",
-        )
+        cap_before_send = await _capture_main_window("wecom_before_send")
         debug_info.setdefault("captures", []).append({"step": "before_send_focus", "capture": cap_before_send})
         iw_send = int(cap_before_send.get("imageWidth", 0) or 0)
         ih_send = int(cap_before_send.get("imageHeight", 0) or 0)

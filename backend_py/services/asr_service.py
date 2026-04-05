@@ -41,20 +41,39 @@ class ASRService:
 
     @staticmethod
     def _guess_mime(audio: bytes) -> str:
+        """基于文件头做轻量 MIME 推断。
+
+        注意：我们尽量不依赖文件扩展名，因为前端/测试脚本可能以 bytes 直传。
+        """
+
         if audio.startswith(b"RIFF") and b"WAVE" in audio[8:16]:
             return "audio/wav"
+
+        # MP3
         if audio.startswith(b"ID3") or audio[:2] == b"\xff\xfb":
             return "audio/mpeg"
+
+        # WebM（EBML header）
         if audio.startswith(b"\x1aE\xdf\xa3"):
-            # EBML header (WebM)
             return "audio/webm"
+
+        # MP4/M4A（ISO Base Media File Format）
+        # 常见结构：size(4 bytes) + 'ftyp'(4 bytes) + brand(4 bytes)
+        if len(audio) >= 12 and audio[4:8] == b"ftyp":
+            brand = audio[8:12]
+            # iOS 录音常见 brand：M4A / isom / mp42（不同设备/工具可能不同）
+            if brand in {b"M4A ", b"isom", b"mp42", b"MSNV", b"M4B ", b"M4P ", b"M4V "}:
+                return "audio/mp4"
+            # 兜底：只要是 ftyp，我们也倾向认为是 mp4 容器
+            return "audio/mp4"
+
         return "application/octet-stream"
 
     @staticmethod
     def _mime_to_audio_format(mime: str) -> str:
         """将 MIME 映射为兼容模式 `input_audio.format`。
 
-        兼容模式要求提供 format（例如 wav/mp3/webm）。
+        兼容模式要求提供 format（例如 wav/mp3/webm/m4a）。
         """
 
         m = str(mime or "").lower().strip()
@@ -64,6 +83,10 @@ class ASRService:
             return "mp3"
         if m == "audio/webm":
             return "webm"
+        if m in {"audio/mp4", "video/mp4", "audio/m4a"}:
+            # 手机录音常见
+            return "m4a"
+
         # 兜底：多数录音是 wav
         return "wav"
 

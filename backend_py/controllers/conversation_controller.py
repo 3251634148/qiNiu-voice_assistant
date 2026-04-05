@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -16,9 +17,11 @@ from backend_py.services.device_location_service import DeviceLocationService
 from backend_py.services.llm_service import LLMService
 from backend_py.services.memory_service import MemoryService
 from backend_py.services.network_tools_service import NetworkToolsService
+from backend_py.services.perf_recorder import PerfRecorder
 from backend_py.services.system_controller import SystemController
 from backend_py.services.tool_router import ToolRouter
 from backend_py.services.tts_service import TTSService
+from backend_py.services.ui_workflow_utils import now_ms, text_digest
 from backend_py.session_store import SessionStore
 
 
@@ -182,30 +185,64 @@ class ConversationController:
     ) -> None:
         session_id, emit_to = self._resolve_session_and_emit_to(sid)
 
+        effective_request_id = (
+            request_id.strip()
+            if isinstance(request_id, str) and request_id.strip()
+            else self._gen_request_id(session_id)
+        )
+
+        session = self.session_store.get_or_create(session_id)
+        session.current_request_id = effective_request_id
+
+        # 让所有 ui_debug 落盘统一进 ui_debug/<requestId>/
+        try:
+            os.environ["VOICE_ASSISTANT_DEBUG_RUN"] = effective_request_id
+        except Exception:
+            pass
+
+        perf = PerfRecorder(request_id=effective_request_id)
+        perf.set_meta(source="voice", sessionId=session_id, emitTo=emit_to, language=str(language or ""))
+
+        t_req0 = now_ms()
+
         audio_bytes = self._coerce_audio_bytes(audio_data)
+        perf.set_metric("audioBytes", int(len(audio_bytes or b"")))
+
         if not audio_bytes:
+            perf.set_meta(ok=False, errorStage="voice_input", error="empty_audio")
+            perf.add_span(name="voice_total", start_ms=t_req0, end_ms=now_ms(), ok=False, error="empty_audio")
+            perf.dump()
+
             await self.sio.emit(
                 "assistant-message",
                 {
                     "type": "error",
                     "content": "未收到有效音频数据，请重试",
-                    "requestId": request_id,
+                    "requestId": effective_request_id,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
                 to=emit_to,
             )
             return
 
+        # ASR
+        t_asr0 = now_ms()
         try:
             recognized = await self.asr_service.transcribe(audio_bytes, language=language)
+            perf.add_span(name="asr", start_ms=t_asr0, end_ms=now_ms(), ok=True)
         except Exception as e:
+            perf.add_span(name="asr", start_ms=t_asr0, end_ms=now_ms(), ok=False, error=str(e))
+            perf.set_meta(ok=False, errorStage="asr", error=str(e))
+            perf.add_span(name="voice_total", start_ms=t_req0, end_ms=now_ms(), ok=False, error="asr_failed")
+            perf.dump()
+
             logger.exception("ASR失败: %s", e)
             await self.sio.emit(
                 "assistant-message",
                 {
                     "type": "error",
                     "content": f"语音识别失败：{e}",
-                    "requestId": request_id,
+                    "requestId": effective_request_id,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
                 to=emit_to,
@@ -213,13 +250,20 @@ class ConversationController:
             return
 
         recognized_text = str(recognized or "").strip()
+        td = text_digest(recognized_text)
+        perf.set_metric("recognizedText", {"length": int(td.length), "sha256": str(td.sha256)})
+
         if not recognized_text:
+            perf.set_meta(ok=False, errorStage="asr", error="empty_transcript")
+            perf.add_span(name="voice_total", start_ms=t_req0, end_ms=now_ms(), ok=False, error="empty_transcript")
+            perf.dump()
+
             await self.sio.emit(
                 "assistant-message",
                 {
                     "type": "error",
                     "content": "未识别到有效语音内容，请重试",
-                    "requestId": request_id,
+                    "requestId": effective_request_id,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
                 to=emit_to,
@@ -231,14 +275,20 @@ class ConversationController:
             {
                 "text": recognized_text,
                 "language": language,
-                "requestId": request_id,
+                "requestId": effective_request_id,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             },
             to=emit_to,
         )
 
+        # 先落一次 perf，确保即使后续工具确认/断连也能复盘 ASR 段。
+        perf.dump()
+
         # 注意：文本处理链路使用同一个 emit_to（room 或 socket sid）来保证结果可回传。
-        await self.handle_text_command(sid=emit_to, text=recognized_text, request_id=request_id)
+        await self.handle_text_command(sid=emit_to, text=recognized_text, request_id=effective_request_id)
+
+        perf.add_span(name="voice_total", start_ms=t_req0, end_ms=now_ms(), ok=True)
+        perf.dump()
 
     def _gen_request_id(self, sid: str) -> str:
         return f"req_{sid}_{int(time.time() * 1000)}_{random.randint(100000, 999999)}"
@@ -823,18 +873,28 @@ class ConversationController:
         name = fn.get("name") if isinstance(fn, dict) else tool_call.get("name")
         return name if isinstance(name, str) and name.strip() else None
 
-    def _build_assistant_tool_call_message(self, *, content: str, tool_calls: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _build_assistant_tool_call_message(
+        self,
+        *,
+        content: str,
+        tool_calls: List[Dict[str, Any]],
+        thinking: str = "",
+    ) -> Dict[str, Any]:
         """构造带 tool_calls 的 assistant 消息。
 
-        目前 DashScope/OpenAI 兼容接口与 Ollama 原生 `/api/chat` 都接受该形态，
-        因此这里保持统一，避免把 provider 分支扩散到业务逻辑里。
+        目前 DashScope/OpenAI 兼容接口与 Ollama 原生 `/api/chat` 都接受该形态。
+        当 Ollama 流式返回 thinking 时，也一并回填到下一轮消息，避免 tool-loop
+        丢失模型在本轮已经输出的推理上下文。
         """
 
-        return {
+        message: Dict[str, Any] = {
             "role": "assistant",
             "content": str(content or ""),
             "tool_calls": tool_calls,
         }
+        if str(thinking or ""):
+            message["thinking"] = str(thinking or "")
+        return message
 
     def _build_tool_result_message(self, *, tool_call_id: str, tool_name: str, content: str) -> Dict[str, Any]:
         """按 provider 生成 tool-loop 的工具结果消息。"""
@@ -937,6 +997,7 @@ class ConversationController:
                 self._build_assistant_tool_call_message(
                     content=current.get("text") or "",
                     tool_calls=tool_calls,
+                    thinking=(current.get("thinking") or "") if isinstance(current, dict) else "",
                 )
             )
 
@@ -1461,15 +1522,36 @@ class ConversationController:
         session = self.session_store.get_or_create(session_id)
         session.current_request_id = effective_request_id
 
+        # 让所有 ui_debug 落盘统一进 ui_debug/<requestId>/
+        try:
+            os.environ["VOICE_ASSISTANT_DEBUG_RUN"] = effective_request_id
+        except Exception:
+            pass
+
+        perf = PerfRecorder(request_id=effective_request_id)
+        # 若该 requestId 已由语音入口写入 source=voice，则不覆盖。
+        if not perf.meta.get("source"):
+            perf.set_meta(source="text")
+        perf.set_meta(sessionId=session_id, emitTo=emit_to)
+        t_cmd0 = now_ms()
+
         self.reset_tts_stop(session_id)
 
         user_text = str(text or "").strip()
+        td_user = text_digest(user_text)
+        perf.set_metric("userText", {"length": int(td_user.length), "sha256": str(td_user.sha256)})
+
         if not user_text:
+            perf.set_meta(ok=False, errorStage="input", error="empty_text")
+            perf.add_span(name="text_dispatch", start_ms=t_cmd0, end_ms=now_ms(), ok=False, error="empty_text")
+            perf.dump()
+
             await self.sio.emit(
                 "assistant-message",
                 {
                     "type": "error",
                     "content": "请输入文本",
+                    "requestId": effective_request_id,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 },
                 to=emit_to,
@@ -1516,12 +1598,31 @@ class ConversationController:
         # 注入长期记忆上下文（user_profile + rolling_summary）
         memory_context = self.memory_service.build_memory_context()
 
+        t_llm0 = now_ms()
         llm_resp = await self.llm_service.invoke_llm(
             messages,
             tools=tool_defs,
             parallel_tool_calls=include_network,
             memory_context=memory_context,
         )
+        t_llm1 = now_ms()
+        try:
+            perf.add_span(
+                name="llm_main",
+                start_ms=t_llm0,
+                end_ms=t_llm1,
+                ok=True,
+                meta={
+                    "includeNetwork": bool(include_network),
+                    "includeDeviceLocation": bool(include_device_location),
+                    "toolsCount": int(len(tool_defs or [])) if isinstance(tool_defs, list) else None,
+                    "historyMessages": int(len(messages or [])) if isinstance(messages, list) else None,
+                },
+            )
+            perf.set_metric("llm", {"provider": llm_resp.get("provider"), "model": llm_resp.get("model"), "usage": llm_resp.get("usage")})
+            perf.dump()
+        except Exception:
+            pass
 
         # 兼容：模型可能把"工具调用意图"写在 INTENT_JSON.actions 中，而不是 tool_calls。
         # 对于 get_device_location 与联网工具，我们必须走 tool-loop 回填，再让模型总结输出，避免被 SafetyService 当作"未知工具"拦截。
@@ -1565,6 +1666,7 @@ class ConversationController:
                 llm_resp = {**llm_resp, "toolCalls": synthesized, "text": ""}
 
         if include_network or include_device_location:
+            t_loop0 = now_ms()
             llm_resp = await self._maybe_run_network_tool_loop(
                 # 关键修复：传入 session_id，避免 tool-loop 读错会话态（sid/room 可能导致默认 False）。
                 sid=session_id,
@@ -1574,6 +1676,11 @@ class ConversationController:
                 llm_resp=llm_resp,
                 tool_defs=tool_defs,
             )
+            try:
+                perf.add_span(name="network_tool_loop", start_ms=t_loop0, end_ms=now_ms(), ok=True)
+                perf.dump()
+            except Exception:
+                pass
 
         # 记录"本次模型/工具最终是否使用了 IP 定位/使用了哪个 location 参数"，便于复盘。
         try:
@@ -1774,6 +1881,14 @@ class ConversationController:
             )
 
         if selected_tool_calls:
+            try:
+                names = [self._tool_name_from_call(tc) or "" for tc in (selected_tool_calls or []) if isinstance(tc, dict)]
+                perf.set_metric("plannedToolCalls", {"count": int(len(names)), "names": names[:12]})
+                perf.add_span(name="text_dispatch", start_ms=t_cmd0, end_ms=now_ms(), ok=True, meta={"dispatched": "tool_calls"})
+                perf.dump()
+            except Exception:
+                pass
+
             await self.handle_tool_calls(sid=emit_to, tool_calls=selected_tool_calls)
             return
 
@@ -1783,12 +1898,26 @@ class ConversationController:
         cancel_event = asyncio.Event()
 
         async def _run_tts() -> None:
+            t_tts0 = now_ms()
+            first_chunk_ms: Optional[int] = None
+            total_audio_bytes = 0
             try:
                 async def on_chunk(wav_bytes: bytes) -> None:
+                    nonlocal first_chunk_ms, total_audio_bytes
                     if self.is_tts_stopped(session_id):
                         cancel_event.set()
                         return
+
                     if wav_bytes:
+                        total_audio_bytes += int(len(wav_bytes))
+                        if first_chunk_ms is None:
+                            first_chunk_ms = now_ms()
+                            # 首包耗时只记录一次
+                            try:
+                                perf.set_metric("ttsTTFBMs", int(first_chunk_ms - t_tts0))
+                            except Exception:
+                                pass
+
                         await self.sio.emit(
                             "audio-chunk",
                             {
@@ -1832,7 +1961,29 @@ class ConversationController:
                         to=emit_to,
                     )
 
+                # perf：TTS 流式耗时
+                try:
+                    t_tts1 = now_ms()
+                    perf.set_metric("ttsTotalMs", int(t_tts1 - t_tts0))
+                    perf.set_metric("ttsAudioBytesTotal", int(total_audio_bytes))
+                    perf.add_span(
+                        name="tts_stream",
+                        start_ms=t_tts0,
+                        end_ms=t_tts1,
+                        ok=True,
+                        meta={"audioFull": bool(audio_full)},
+                    )
+                    perf.dump()
+                except Exception:
+                    pass
+
             except asyncio.CancelledError:
+                try:
+                    t_tts1 = now_ms()
+                    perf.add_span(name="tts_stream", start_ms=t_tts0, end_ms=t_tts1, ok=False, error="cancelled")
+                    perf.dump()
+                except Exception:
+                    pass
                 # 尽力而为：仍发送 completion，保证前端状态可收敛。
                 await self.sio.emit(
                     "audio-chunk",
@@ -1844,7 +1995,14 @@ class ConversationController:
                     },
                     to=emit_to,
                 )
-            except Exception:
+            except Exception as e:
+                try:
+                    t_tts1 = now_ms()
+                    perf.add_span(name="tts_stream", start_ms=t_tts0, end_ms=t_tts1, ok=False, error=str(e))
+                    perf.dump()
+                except Exception:
+                    pass
+
                 await self.sio.emit(
                     "audio-response",
                     {
@@ -1858,6 +2016,12 @@ class ConversationController:
 
         task = asyncio.create_task(_run_tts())
         self._tts_tasks[session_id] = task
+
+        try:
+            perf.add_span(name="text_dispatch", start_ms=t_cmd0, end_ms=now_ms(), ok=True, meta={"dispatched": "tts_task"})
+            perf.dump()
+        except Exception:
+            pass
 
     async def _update_memory_after_turn(
         self,
@@ -1987,6 +2151,29 @@ class ConversationController:
         )
 
         session = self.session_store.get_or_create(session_id)
+
+        perf_request_id = str(
+            session.current_request_id
+            or tool_call.get("id")
+            or tool_call.get("name")
+            or f"tool_{int(time.time() * 1000)}"
+        ).strip()
+        try:
+            if perf_request_id:
+                os.environ["VOICE_ASSISTANT_DEBUG_RUN"] = perf_request_id
+        except Exception:
+            pass
+
+        perf = PerfRecorder(request_id=perf_request_id) if perf_request_id else None
+        try:
+            if perf is not None and not perf.meta.get("source"):
+                perf.set_meta(source="tool")
+            if perf is not None:
+                perf.set_meta(sessionId=session_id, emitTo=emit_to)
+        except Exception:
+            perf = perf
+
+        t_tool0 = now_ms()
         result = await self.tool_router.route_and_execute(
             tool_call,
             {
@@ -1995,6 +2182,30 @@ class ConversationController:
                 "allowLocalControl": self.is_local_control_allowed(session_id),
             },
         )
+        t_tool1 = now_ms()
+
+        try:
+            if perf is not None:
+                tool_name = str(tool_call.get("name") or "")
+                perf.add_span(
+                    name=f"tool:{tool_name}" if tool_name else "tool",
+                    start_ms=t_tool0,
+                    end_ms=t_tool1,
+                    ok=bool(result.get("success") is True),
+                    error=str(result.get("error") or "") if not bool(result.get("success") is True) else "",
+                    meta={"toolCallId": tool_call.get("id"), "name": tool_name},
+                )
+                perf.set_metric(
+                    "lastTool",
+                    {
+                        "name": tool_name,
+                        "success": bool(result.get("success") is True),
+                        "ms": int(t_tool1 - t_tool0),
+                    },
+                )
+                perf.dump()
+        except Exception:
+            pass
 
         self.session_store.add_message(
             session_id,
@@ -2019,7 +2230,20 @@ class ConversationController:
         if result.get("success") and (result.get("result") or {}).get("message"):
             msg = (result.get("result") or {}).get("message")
             voice_settings = session.tts_settings or {"gender": "female", "rate": 1.0, "pitch": 1.0}
+            t_tts0 = now_ms()
             audio = await self.tts_service.text_to_speech(msg, voice_settings, request_id=session.current_request_id)
+            t_tts1 = now_ms()
+
+            try:
+                perf_id = str(session.current_request_id or perf_request_id or "").strip()
+                if perf_id:
+                    p2 = PerfRecorder(request_id=perf_id)
+                    p2.add_span(name="tts_tool_feedback", start_ms=t_tts0, end_ms=t_tts1, ok=True)
+                    p2.set_metric("ttsToolFeedbackMs", int(t_tts1 - t_tts0))
+                    p2.dump()
+            except Exception:
+                pass
+
             await self.sio.emit(
                 "audio-response",
                 {

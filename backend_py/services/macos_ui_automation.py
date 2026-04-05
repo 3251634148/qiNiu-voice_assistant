@@ -762,6 +762,163 @@ class MacOSUIAutomation:
         return (wid, bounds, owner)
 
     @classmethod
+    def _find_window_by_expected_bounds_sync(
+        cls,
+        owner_names: Sequence[str],
+        *,
+        expected_bounds: Mapping[str, Any],
+        tolerance_px: float = 32.0,
+    ) -> Tuple[int, WindowBounds, str]:
+        """按期望 bounds 绑定窗口。
+
+        用途：窗口被 normalize 后，需要在 Quartz 窗口列表中重新定位“同一个主窗口”，
+        后续截图/验证必须围绕该窗口进行，避免在多窗口场景下被“面积最大窗口”误导。
+        """
+
+        try:
+            from Quartz import CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowListOptionOnScreenOnly
+        except Exception as e:
+            raise RuntimeError(f"无法读取窗口列表（Quartz 不可用）：{e}")
+
+        tokens = {cls._normalize_owner_name(str(n)) for n in owner_names if str(n).strip()}
+        tokens = {t for t in tokens if t}
+        if not tokens:
+            raise RuntimeError("owner_names 不能为空")
+
+        expected = WindowBounds(
+            x=float(expected_bounds.get("x") or expected_bounds.get("X") or 0.0),
+            y=float(expected_bounds.get("y") or expected_bounds.get("Y") or 0.0),
+            width=float(expected_bounds.get("width") or expected_bounds.get("Width") or 0.0),
+            height=float(expected_bounds.get("height") or expected_bounds.get("Height") or 0.0),
+        )
+        if expected.width < 120 or expected.height < 120:
+            raise RuntimeError(f"期望窗口尺寸无效：{dict(expected_bounds or {})}")
+
+        def _owner_match(owner_name: str) -> bool:
+            o = cls._normalize_owner_name(owner_name)
+            if not o:
+                return False
+            for t in tokens:
+                if not t:
+                    continue
+                if t == o:
+                    return True
+                if len(t) >= 3 and t in o:
+                    return True
+                if len(o) >= 3 and o in t:
+                    return True
+            return False
+
+        windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) or []
+        tolerances = [max(8.0, float(tolerance_px)), max(48.0, float(tolerance_px) * 3.0)]
+
+        for tol in tolerances:
+            candidates: list[tuple[tuple[float, float, float], int, WindowBounds, str]] = []
+            for info in windows:
+                if not hasattr(info, "get"):
+                    continue
+
+                owner = str(info.get("kCGWindowOwnerName") or "").strip()
+                if not _owner_match(owner):
+                    continue
+
+                try:
+                    layer = int(info.get("kCGWindowLayer") or 0)
+                except Exception:
+                    layer = 0
+                if layer < 0 or layer > 2:
+                    continue
+
+                bounds_dict = info.get("kCGWindowBounds")
+                if not hasattr(bounds_dict, "get"):
+                    continue
+                bounds = cls._parse_window_bounds(bounds_dict)
+                if bounds.width < 120 or bounds.height < 120:
+                    continue
+
+                dx = abs(float(bounds.x) - float(expected.x))
+                dy = abs(float(bounds.y) - float(expected.y))
+                dw = abs(float(bounds.width) - float(expected.width))
+                dh = abs(float(bounds.height) - float(expected.height))
+                if max(dx, dy, dw, dh) > float(tol):
+                    continue
+
+                try:
+                    alpha = float(info.get("kCGWindowAlpha") or 1.0)
+                except Exception:
+                    alpha = 1.0
+                if alpha <= 0.01:
+                    continue
+
+                is_onscreen_raw = info.get("kCGWindowIsOnscreen")
+                is_onscreen = bool(is_onscreen_raw is True or is_onscreen_raw == 1)
+                if not is_onscreen:
+                    continue
+
+                try:
+                    wid = int(info.get("kCGWindowNumber"))
+                except Exception:
+                    continue
+
+                delta_sum = float(dx + dy + dw + dh)
+                area_delta = abs(float(bounds.width * bounds.height) - float(expected.width * expected.height))
+                score = (-delta_sum, -area_delta, max(0.2, min(alpha, 1.0)))
+                candidates.append((score, wid, bounds, owner))
+
+            if candidates:
+                _, wid, bounds, owner = max(candidates, key=lambda x: x[0])
+                return (wid, bounds, owner)
+
+        raise RuntimeError(
+            f"未找到与期望 bounds 匹配的窗口：owners={list(owner_names)} expected={dict(expected_bounds or {})}"
+        )
+
+    @classmethod
+    def _find_window_info_by_id_sync(cls, window_id: int) -> Optional[Tuple[WindowBounds, str]]:
+        """按 windowId 查询当前窗口 bounds 与 owner。"""
+
+        try:
+            from Quartz import (
+                CGWindowListCopyWindowInfo,
+                kCGNullWindowID,
+                kCGWindowListExcludeDesktopElements,
+                kCGWindowListOptionAll,
+                kCGWindowListOptionOnScreenOnly,
+            )
+        except Exception:
+            return None
+
+        target_id = int(window_id)
+        window_lists = [
+            CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) or [],
+            CGWindowListCopyWindowInfo(
+                int(kCGWindowListOptionAll) | int(kCGWindowListExcludeDesktopElements),
+                kCGNullWindowID,
+            )
+            or [],
+        ]
+
+        for windows in window_lists:
+            for info in windows:
+                if not hasattr(info, "get"):
+                    continue
+                try:
+                    wid = int(info.get("kCGWindowNumber"))
+                except Exception:
+                    continue
+                if wid != target_id:
+                    continue
+
+                bounds_dict = info.get("kCGWindowBounds")
+                if not hasattr(bounds_dict, "get"):
+                    continue
+                bounds = cls._parse_window_bounds(bounds_dict)
+                owner = str(info.get("kCGWindowOwnerName") or "").strip()
+                return (bounds, owner)
+
+        return None
+
+    @classmethod
     def _pick_child_window_from_infos(
         cls,
         *,
@@ -770,6 +927,7 @@ class MacOSUIAutomation:
         parent_bounds: Mapping[str, Any],
         min_area_ratio: float = 0.02,
         max_area_ratio: float = 0.70,
+        exclude_window_ids: Optional[Sequence[int]] = None,
     ) -> Optional[Tuple[int, WindowBounds, str]]:
         """从窗口列表中挑选“位于主窗口内部的弹窗子窗口”。
 
@@ -781,6 +939,7 @@ class MacOSUIAutomation:
         - onscreen / alpha > 0
         - child 窗口中心点落在 parent_bounds 内（避免误选其他屏幕/其他应用窗口）
         - child 面积介于 [min_area_ratio, max_area_ratio] * parent_area 之间
+        - 显式排除已绑定的主窗口 windowId，避免把主窗口自己误认成“弹窗”
         - 评分优先选更大、更清晰的候选（面积 * alpha），以提高 OCR 稳定性
         """
 
@@ -788,6 +947,13 @@ class MacOSUIAutomation:
         tokens = {t for t in tokens if t}
         if not tokens:
             return None
+
+        excluded_ids: set[int] = set()
+        for wid in list(exclude_window_ids or []):
+            try:
+                excluded_ids.add(int(wid))
+            except Exception:
+                continue
 
         def _owner_match(owner_name: str) -> bool:
             o = cls._normalize_owner_name(owner_name)
@@ -830,12 +996,24 @@ class MacOSUIAutomation:
             if not _owner_match(owner):
                 continue
 
+            window_id = info.get("kCGWindowNumber")
+            try:
+                wid = int(window_id)
+            except Exception:
+                continue
+            if wid in excluded_ids:
+                continue
+
             bounds_dict = info.get("kCGWindowBounds")
             if not hasattr(bounds_dict, "get"):
                 continue
 
             bounds = cls._parse_window_bounds(bounds_dict)
             if bounds.width < 120 or bounds.height < 80:
+                continue
+
+            # 显式排除与主窗口几乎同尺寸的窗口，避免把主窗口自身误当成“子窗口弹层”。
+            if bounds.width >= pb.width * 0.92 and bounds.height >= pb.height * 0.92:
                 continue
 
             # 中心点必须落在主窗口内（弹窗通常 overlay 在主窗口区域中）
@@ -860,12 +1038,6 @@ class MacOSUIAutomation:
             if not is_onscreen:
                 continue
 
-            window_id = info.get("kCGWindowNumber")
-            try:
-                wid = int(window_id)
-            except Exception:
-                continue
-
             score = area * max(0.2, min(alpha, 1.0))
             if best is None or score > best[0]:
                 best = (score, wid, bounds, owner)
@@ -883,6 +1055,7 @@ class MacOSUIAutomation:
         tag: str = "window_child",
         min_area_ratio: float = 0.02,
         max_area_ratio: float = 0.70,
+        exclude_window_ids: Optional[Sequence[int]] = None,
     ) -> Dict[str, Any]:
         """截取同一应用在主窗口内的“子窗口/弹窗”。
 
@@ -908,6 +1081,7 @@ class MacOSUIAutomation:
                 parent_bounds=parent_window_bounds,
                 min_area_ratio=min_area_ratio,
                 max_area_ratio=max_area_ratio,
+                exclude_window_ids=exclude_window_ids,
             )
             if picked is None:
                 raise RuntimeError("未找到主窗口内的子窗口/弹窗（用于全局搜索 tab 点击）")
@@ -929,6 +1103,90 @@ class MacOSUIAutomation:
             return {
                 "screenshotPath": str(out_path),
                 "ownerName": owner,
+                "windowId": wid,
+                "windowBounds": {
+                    "x": bounds.x,
+                    "y": bounds.y,
+                    "width": bounds.width,
+                    "height": bounds.height,
+                },
+                "imageSize": {"width": image_size.width, "height": image_size.height},
+                "pngLosslessCompress": compress_meta,
+            }
+
+        return await asyncio.to_thread(_run)
+
+    async def resolve_window_ref_by_expected_bounds(
+        self,
+        *,
+        owner_names: Sequence[str],
+        expected_bounds: Mapping[str, Any],
+        tolerance_px: float = 32.0,
+    ) -> Dict[str, Any]:
+        """按期望 bounds 解析稳定窗口引用。"""
+
+        def _run() -> Dict[str, Any]:
+            wid, bounds, owner = self._find_window_by_expected_bounds_sync(
+                owner_names,
+                expected_bounds=expected_bounds,
+                tolerance_px=float(tolerance_px),
+            )
+            return {
+                "ownerName": owner,
+                "windowId": int(wid),
+                "windowBounds": {
+                    "x": bounds.x,
+                    "y": bounds.y,
+                    "width": bounds.width,
+                    "height": bounds.height,
+                },
+            }
+
+        return await asyncio.to_thread(_run)
+
+    async def screenshot_window_by_id(
+        self,
+        *,
+        window_id: int,
+        tag: str = "window",
+        owner_name: Optional[str] = None,
+        window_bounds: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """按 windowId 截图，避免再次按 ownerName 重新猜测窗口。"""
+
+        out_path = self._debug_dir() / f"{tag}_{int(time.time() * 1000)}.png"
+
+        def _run() -> Dict[str, Any]:
+            wid = int(window_id)
+            proc = subprocess.run(
+                ["screencapture", "-l", str(wid), "-x", "-o", str(out_path)],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr.strip() or f"screencapture(window_id={wid}) 执行失败")
+
+            compress_meta: Optional[dict[str, Any]] = None
+            if self._is_png_lossless_compress_enabled():
+                compress_meta = self._lossless_recompress_png_zlib_sync(str(out_path))
+
+            current_meta = self._find_window_info_by_id_sync(wid)
+            if current_meta is not None:
+                bounds, current_owner = current_meta
+            else:
+                fallback = window_bounds or {}
+                bounds = WindowBounds(
+                    x=float(fallback.get("x") or 0.0),
+                    y=float(fallback.get("y") or 0.0),
+                    width=float(fallback.get("width") or 0.0),
+                    height=float(fallback.get("height") or 0.0),
+                )
+                current_owner = str(owner_name or "")
+
+            image_size = self._get_image_size_sync(str(out_path))
+            return {
+                "screenshotPath": str(out_path),
+                "ownerName": str(current_owner or owner_name or ""),
                 "windowId": wid,
                 "windowBounds": {
                     "x": bounds.x,
