@@ -650,6 +650,10 @@ class ConversationController:
 
         # 去掉常见的口头前缀。
         for prefix in [
+            "帮我播放",
+            "请播放",
+            "麻烦播放",
+            "给我播放",
             "我想听",
             "我要听",
             "帮我放",
@@ -659,6 +663,7 @@ class ConversationController:
             "来一首",
             "来首",
             "放一首",
+            "听一下",
             "听",
         ]:
             if t.startswith(prefix):
@@ -732,9 +737,15 @@ class ConversationController:
 
         # 正向信号：必须出现较明确的"音乐/听歌/点歌/播放一首"类表达。
         keywords = [
+            "我想听",
+            "我要听",
+            "想听",
+            "听一下",
             "听歌",
             "听音乐",
             "放歌",
+            "帮我播放",
+            "给我播放",
             "播放音乐",
             "来点音乐",
             "来点歌",
@@ -745,6 +756,8 @@ class ConversationController:
             "来一首",
             "来首",
             "放一首",
+            "帮我放",
+            "给我放",
             "播放",
         ]
         return any(k in t for k in keywords)
@@ -823,6 +836,148 @@ class ConversationController:
                 return True
 
         return False
+
+    @staticmethod
+    def _is_time_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+        return any(k in t for k in ["几点", "现在几点", "当前时间", "现在时间", "时间"])
+
+    @staticmethod
+    def _is_news_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+        return any(k in t for k in ["新闻", "热点", "热搜", "最新消息"])
+
+    @staticmethod
+    def _is_web_search_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+        # “查一下/搜一下/帮我查/搜索”这类更像需要联网。
+        return any(k in t for k in ["查一下", "搜一下", "帮我查", "搜索", "查一查", "搜一搜", "检索"])
+
+    @staticmethod
+    def _is_wecom_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+        if any(k in t for k in ["企业微信", "企微", "WeCom", "wecom"]):
+            return any(k in t for k in ["发", "发送", "消息", "通知", "说"])
+        return False
+
+    @staticmethod
+    def _is_douyin_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+        if any(k in t for k in ["抖音", "Douyin", "douyin"]):
+            return any(k in t for k in ["搜", "搜索", "找", "播放", "刷", "视频"])
+        return False
+
+    @staticmethod
+    def _is_file_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+        keywords = ["文件", "目录", "文件夹", "读取", "读一下", "写入", "保存", "创建", "删除", "移动", "复制", "重命名"]
+        return any(k in t for k in keywords)
+
+    @staticmethod
+    def _is_open_app_request(user_text: str) -> bool:
+        t = str(user_text or "").strip()
+        if not t:
+            return False
+        return t.startswith("打开") or "启动" in t or "打开应用" in t
+
+    @staticmethod
+    def _is_code_or_test_request(user_text: str) -> bool:
+        t = str(user_text or "").strip().lower()
+        if not t:
+            return False
+        keywords = ["pytest", "单测", "测试", "运行测试", "run_tests", "运行代码", "跑一下", "执行代码"]
+        return any(k in t for k in keywords)
+
+    @staticmethod
+    def _prune_tool_defs_for_ollama(
+        *,
+        user_text: str,
+        tool_defs: List[Dict[str, Any]],
+        include_network: bool,
+        include_device_location: bool,
+    ) -> List[Dict[str, Any]]:
+        """仅对 Ollama 生效的工具裁剪（A3）。
+
+        设计目标：
+        - 尽量减少传给本地模型的 tools schema（降低 prompt_tokens）。
+        - 保持主链路行为兼容：识别不到明确意图时宁可不给工具（回到纯对话），避免小模型乱选工具。
+        """
+
+        text = str(user_text or "").strip()
+        if not text:
+            return []
+
+        allowed: set[str] = set()
+
+        if ConversationController._is_music_request(text):
+            allowed |= {"music_ui", "play_music", "stop_music", "media_control"}
+
+        if ConversationController._is_wecom_request(text):
+            allowed |= {"wecom_ui"}
+
+        if ConversationController._is_douyin_request(text):
+            allowed |= {"douyin_ui"}
+
+        if ConversationController._is_file_request(text):
+            allowed |= {"file_control", "write_file"}
+
+        if ConversationController._is_open_app_request(text):
+            allowed |= {"open_app"}
+
+        if ConversationController._is_code_or_test_request(text):
+            allowed |= {"write_run_code", "run_tests"}
+
+        # 联网工具：仅在用户文本明显需要实时信息时才开放。
+        needs_network = (
+            ConversationController._is_weather_request(text)
+            or ConversationController._is_news_request(text)
+            or ConversationController._is_time_request(text)
+            or ConversationController._is_web_search_request(text)
+        )
+
+        if include_network and needs_network:
+            allowed |= {
+                "get_current_time",
+                "web_search",
+                "get_latest_news",
+                "get_weather_now",
+                "get_weather_12h",
+                "get_ip_location",
+            }
+
+        # 设备定位工具仅在“天气/定位”相关时才开放。
+        needs_device_location = ConversationController._is_weather_request(text) or ConversationController._is_location_request(text)
+        if include_device_location and needs_device_location:
+            allowed |= {"get_device_location"}
+
+        # 多步任务：只在已经识别出至少一个本地工具时才开放。
+        if allowed & {"music_ui", "wecom_ui", "douyin_ui", "file_control", "write_file", "open_app", "write_run_code", "run_tests"}:
+            allowed |= {"execute_workflow"}
+
+        if not allowed:
+            return []
+
+        pruned: List[Dict[str, Any]] = []
+        for td in list(tool_defs or []):
+            if not isinstance(td, dict):
+                continue
+            name = str(td.get("name") or "").strip()
+            if name and name in allowed:
+                pruned.append(td)
+
+        return pruned
 
     @staticmethod
     def _is_location_request(user_text: str) -> bool:
@@ -1594,6 +1749,15 @@ class ConversationController:
             include_network=include_network,
             include_device_location=include_device_location,
         )
+
+        # A3：仅在 Ollama provider 下按意图裁剪 tools，降低 prompt token 与推理耗时。
+        if getattr(self.llm_service, "provider", "") == "ollama":
+            tool_defs = self._prune_tool_defs_for_ollama(
+                user_text=user_text,
+                tool_defs=tool_defs,
+                include_network=include_network,
+                include_device_location=include_device_location,
+            )
 
         # 注入长期记忆上下文（user_profile + rolling_summary）
         memory_context = self.memory_service.build_memory_context()

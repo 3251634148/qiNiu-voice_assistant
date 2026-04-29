@@ -131,6 +131,21 @@ class LLMService:
             "- 用户明确要求详细回答、朗读诗歌、讲故事等场景：可以放宽，但仍尽量精炼\n\n"
             "始终以中文为主，保留必要的英文专有名词。注意：SAY 部分必须是纯文本、适合TTS朗读。"
         )
+        self.ollama_compact_system_prompt = (
+            "你是本地运行的电脑语音助手。你必须只输出符合 response schema 的 JSON，不要输出 Markdown，不要输出 schema 外字段。\n"
+            "返回 JSON 时必须填写这些字段：mode、confidence、say、actions，可选 reason。\n"
+            "目标：用最短路径判断用户意图，给出适合 TTS 朗读的 say，并在 actions 中写出可执行动作。\n"
+            "关键规则：\n"
+            "- say 必须是中文纯文本，简洁自然，默认 30 字内。\n"
+            "- 没有真正要执行的动作时，actions 必须是 []。\n"
+            "- 不要声称已经执行了尚未执行的操作。\n"
+            "- 播放具体歌曲时，必须使用 music_ui(player=\"kugou\", action=\"search\", query=\"歌手 歌名\")。\n"
+            "- 播放泛化音乐时，可使用 play_music(source=\"kugou\")。\n"
+            "- 只有用户明确提到我喜欢/收藏/常听的歌时，才允许使用 favorites_first。\n"
+            "- 写作、解释、闲聊、问答等纯文本任务，actions 置空。\n"
+            "- 天气、新闻、时间、联网搜索等实时信息优先使用对应工具；设备定位与天气要遵守现有定位策略。\n"
+            "- 缺少关键参数时最多问 1 个问题，否则直接给结果。"
+        )
 
         self.function_definitions: List[Dict[str, Any]] = [
             {
@@ -512,16 +527,307 @@ class LLMService:
             return [*base, *self.network_tools.get_tool_definitions()]
         return base
 
-    def _build_system_content(self, *, memory_context: str) -> str:
-        """构建 system prompt。
+    def _build_system_content(self, *, memory_context: str, output_mode: str) -> str:
+        """构建 system prompt。"""
 
-        现有主链路大量依赖 `INTENT_JSON + SAY` 协议，因此 provider 切换时仍保持同一
-        套高层提示词，只在协议层做 provider 专用适配，避免影响 TTS / memory / 前端调试。
-        """
-
+        use_compact_prompt = self.provider == "ollama" and output_mode == "schema_json"
+        base_prompt = self.ollama_compact_system_prompt if use_compact_prompt else self.system_prompt
         if memory_context:
-            return f"{self.system_prompt}\n\n{memory_context}"
-        return self.system_prompt
+            return f"{base_prompt}\n\n{memory_context}"
+        return base_prompt
+
+    @staticmethod
+    def _extract_latest_user_text(messages: List[Dict[str, Any]]) -> str:
+        for msg in reversed(list(messages or [])):
+            if str(msg.get("role") or "").strip() == "user":
+                return str(msg.get("content") or "").strip()
+        if messages:
+            return str(messages[-1].get("content") or "").strip()
+        return ""
+
+    @staticmethod
+    def _looks_like_long_form_request(user_text: str) -> bool:
+        text = str(user_text or "").strip()
+        if not text:
+            return False
+
+        keywords = [
+            "写一篇",
+            "写文章",
+            "写作文",
+            "写文案",
+            "详细",
+            "展开",
+            "解释一下",
+            "分析一下",
+            "总结一下",
+            "讲故事",
+            "讲个故事",
+            "朗读",
+            "读一篇",
+            "演讲",
+            "方案",
+            "报告",
+        ]
+        return any(k in text for k in keywords)
+
+    def _build_ollama_generation_options(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        max_tokens: int,
+        output_mode: str,
+        tool_defs: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        user_text = self._extract_latest_user_text(messages)
+        token_cap = max(64, min(int(max_tokens or 128), 512))
+        is_long_form = self._looks_like_long_form_request(user_text)
+        has_tools = bool(tool_defs)
+
+        if output_mode in {"json", "schema_json"}:
+            if is_long_form:
+                num_predict = min(token_cap, 256)
+            elif has_tools:
+                num_predict = min(token_cap, 128)
+            else:
+                num_predict = min(token_cap, 160)
+            temperature = 0.1
+        else:
+            if is_long_form:
+                num_predict = min(token_cap, 384)
+                temperature = 0.4
+            elif has_tools:
+                num_predict = min(token_cap, 192)
+                temperature = 0.2
+            else:
+                num_predict = min(token_cap, 128)
+                temperature = 0.3
+
+        return {
+            "temperature": float(temperature),
+            "num_predict": max(64, int(num_predict)),
+        }
+
+    @staticmethod
+    def _build_ollama_route_schema(tool_defs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        tool_names = sorted(
+            {
+                str(item.get("name") or "").strip()
+                for item in (tool_defs or [])
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            }
+        )
+        action_item: Dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "工具名"},
+                "arguments": {
+                    "type": "object",
+                    "description": "工具参数对象",
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["name", "arguments"],
+            "additionalProperties": False,
+        }
+
+        if tool_names:
+            action_item["properties"]["name"]["enum"] = tool_names
+            actions_schema: Dict[str, Any] = {
+                "type": "array",
+                "items": action_item,
+                "description": "需要执行的动作；没有动作时返回 []",
+            }
+        else:
+            actions_schema = {
+                "type": "array",
+                "items": action_item,
+                "maxItems": 0,
+                "description": "当前无可用工具，必须返回 []",
+            }
+
+        return {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["ask", "act", "both"]},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "say": {"type": "string", "description": "给用户朗读的文本"},
+                "actions": actions_schema,
+                "reason": {"type": "string", "description": "简短原因，可为空"},
+            },
+            "required": ["mode", "confidence", "say", "actions"],
+            "additionalProperties": False,
+        }
+
+    @classmethod
+    def _normalize_ollama_route_payload(cls, payload: Dict[str, Any], tool_defs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        allowed_names = {
+            str(item.get("name") or "").strip()
+            for item in (tool_defs or [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+
+        actions: List[Dict[str, Any]] = []
+        raw_actions = payload.get("actions") if isinstance(payload, dict) else None
+        if isinstance(raw_actions, list):
+            for item in raw_actions[:3]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                if allowed_names and name not in allowed_names:
+                    continue
+                arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+                actions.append({"name": name, "arguments": arguments})
+
+        raw_mode = str(payload.get("mode") or "").strip().lower()
+        if raw_mode not in {"ask", "act", "both"}:
+            raw_mode = "act" if actions else "ask"
+        if actions and raw_mode == "ask":
+            raw_mode = "both"
+        if (not actions) and raw_mode in {"act", "both"}:
+            raw_mode = "ask"
+
+        confidence = payload.get("confidence")
+        try:
+            confidence_value = max(0.0, min(1.0, float(confidence)))
+        except Exception:
+            confidence_value = 0.9 if actions else 0.6
+
+        say = cls._stringify_message_content(payload.get("say")).strip()
+        if not say and actions:
+            say = "好呀，我来处理。"
+        elif not say:
+            say = "好的。"
+
+        reason = str(payload.get("reason") or "").strip()
+        intent: Dict[str, Any] = {
+            "mode": raw_mode,
+            "confidence": confidence_value,
+            "actions": actions,
+        }
+        if reason:
+            intent["reason"] = reason[:60]
+
+        return {"intent": intent, "say": say}
+
+    @classmethod
+    def _build_structured_text_from_tool_calls(cls, tool_calls: List[Dict[str, Any]]) -> Optional[str]:
+        actions: List[Dict[str, Any]] = []
+        first_name = ""
+        first_args: Dict[str, Any] = {}
+        for tc in tool_calls[:3]:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+            name = str(fn.get("name") or tc.get("name") or "").strip()
+            if not name:
+                continue
+            args_raw = fn.get("arguments") if isinstance(fn, dict) else tc.get("arguments")
+            args: Dict[str, Any] = {}
+            if isinstance(args_raw, str):
+                try:
+                    args = json.loads(args_raw)
+                except Exception:
+                    args = {}
+            elif isinstance(args_raw, dict):
+                args = dict(args_raw)
+            actions.append({"name": name, "arguments": args})
+            if not first_name:
+                first_name = name
+                first_args = args
+
+        if not actions:
+            return None
+
+        say = "好呀，我来处理。"
+        if first_name == "music_ui":
+            action = str(first_args.get("action") or "").strip()
+            query = str(first_args.get("query") or "").strip()
+            if action == "search" and query:
+                say = f"我可以用酷狗搜索并播放“{query}”。这需要你确认一下。"
+            elif action == "favorites_first":
+                say = "我可以在酷狗打开我喜欢并播放一首歌。这需要你确认一下。"
+        elif first_name == "play_music":
+            source = str(first_args.get("source") or "kugou").strip() or "kugou"
+            say = f"好，我先打开{source}开始播放。"
+
+        intent = {
+            "mode": "both",
+            "confidence": 0.9,
+            "actions": actions,
+            "reason": "tool_calls_fallback",
+        }
+        return f"INTENT_JSON: {json.dumps(intent, ensure_ascii=False)}\nSAY: {say}"
+
+    @classmethod
+    def _adapt_ollama_structured_route_result(cls, raw_resp: Dict[str, Any], tool_defs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        provider_meta = raw_resp.get("providerMeta") if isinstance(raw_resp.get("providerMeta"), dict) else {}
+        tool_calls = raw_resp.get("toolCalls") if isinstance(raw_resp.get("toolCalls"), list) else []
+        raw_text = cls._stringify_message_content(raw_resp.get("text"))
+        try:
+            payload = json.loads(raw_text)
+        except Exception:
+            fallback_text = cls._build_structured_text_from_tool_calls(tool_calls)
+            if fallback_text:
+                return {
+                    **raw_resp,
+                    "text": fallback_text,
+                    "toolCalls": tool_calls,
+                    "providerMeta": {
+                        **provider_meta,
+                        "structuredRoute": True,
+                        "structuredRouteParsed": False,
+                        "structuredRouteFallback": "tool_calls",
+                    },
+                }
+            return {
+                **raw_resp,
+                "providerMeta": {
+                    **provider_meta,
+                    "structuredRoute": True,
+                    "structuredRouteParsed": False,
+                },
+            }
+
+        if not isinstance(payload, dict):
+            fallback_text = cls._build_structured_text_from_tool_calls(tool_calls)
+            if fallback_text:
+                return {
+                    **raw_resp,
+                    "text": fallback_text,
+                    "toolCalls": tool_calls,
+                    "providerMeta": {
+                        **provider_meta,
+                        "structuredRoute": True,
+                        "structuredRouteParsed": False,
+                        "structuredRouteFallback": "tool_calls",
+                    },
+                }
+            return {
+                **raw_resp,
+                "providerMeta": {
+                    **provider_meta,
+                    "structuredRoute": True,
+                    "structuredRouteParsed": False,
+                },
+            }
+
+        normalized = cls._normalize_ollama_route_payload(payload, tool_defs)
+        intent = normalized["intent"]
+        say = normalized["say"]
+        formatted_text = f"INTENT_JSON: {json.dumps(intent, ensure_ascii=False)}\nSAY: {say}"
+        return {
+            **raw_resp,
+            "text": formatted_text,
+            "toolCalls": tool_calls,
+            "providerMeta": {
+                **provider_meta,
+                "structuredRoute": True,
+                "structuredRouteParsed": True,
+            },
+        }
 
     @staticmethod
     def _stringify_message_content(content: Any) -> str:
@@ -536,6 +842,40 @@ class LLMService:
     @staticmethod
     def _build_openai_tool_defs(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return [{"type": "function", "function": t} for t in tool_defs]
+
+    @classmethod
+    def _prepare_ollama_messages(cls, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """将内部统一消息结构适配为 Ollama 原生 `/api/chat` 可接受的格式。"""
+
+        prepared: List[Dict[str, Any]] = []
+        for raw_msg in list(messages or []):
+            if not isinstance(raw_msg, dict):
+                continue
+
+            msg = dict(raw_msg)
+            tool_calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else None
+            if msg.get("role") == "assistant" and tool_calls is not None:
+                normalized_tool_calls: List[Dict[str, Any]] = []
+                for raw_tc in tool_calls:
+                    if not isinstance(raw_tc, dict):
+                        continue
+                    tc = dict(raw_tc)
+                    fn = tc.get("function") if isinstance(tc.get("function"), dict) else None
+                    if isinstance(fn, dict):
+                        fn_copy = dict(fn)
+                        args_raw = fn_copy.get("arguments")
+                        if isinstance(args_raw, str) and args_raw.strip():
+                            try:
+                                parsed_args = json.loads(args_raw)
+                                if isinstance(parsed_args, (dict, list)):
+                                    fn_copy["arguments"] = parsed_args
+                            except Exception:
+                                logger.debug("ollama tool-loop arguments 反序列化失败，保留原始字符串")
+                        tc["function"] = fn_copy
+                    normalized_tool_calls.append(tc)
+                msg["tool_calls"] = normalized_tool_calls
+            prepared.append(msg)
+        return prepared
 
     async def _invoke_dashscope_chat_completions(
         self,
@@ -606,20 +946,24 @@ class LLMService:
         elif output_mode == "schema_json":
             ollama_format = response_schema
 
-        # 与原有 max_tokens 语义对齐到 Ollama 的 num_predict。
-        options: Dict[str, Any] = {
-            "temperature": 0.7,
-            "num_predict": int(max_tokens),
-        }
+        options = self._build_ollama_generation_options(
+            messages=messages,
+            max_tokens=max_tokens,
+            output_mode=output_mode,
+            tool_defs=tool_defs,
+        )
+
+        prepared_messages = self._prepare_ollama_messages([{"role": "system", "content": sys_content}, *messages])
 
         result = await self.ollama_client.chat(
             model=used_model,
-            messages=[{"role": "system", "content": sys_content}, *messages],
+            messages=prepared_messages,
             stream=True,
             keep_alive="10m",
             options=options,
             tools=self._build_openai_tool_defs(tool_defs) if tool_defs else None,
             response_format=ollama_format,
+            think=False if output_mode in {"json", "schema_json"} else None,
         )
 
         raw_usage = None
@@ -671,19 +1015,32 @@ class LLMService:
         used_model = model or self.model_default
         # tools=None 表示使用默认工具；tools=[] 表示显式禁用工具（例如让模型只总结工具结果）。
         tool_defs = self.function_definitions if tools is None else tools
-        sys_content = self._build_system_content(memory_context=memory_context)
 
         if self.provider == "ollama":
-            return await self._invoke_ollama_api_chat(
+            ollama_output_mode = output_mode
+            ollama_response_schema = response_schema
+            structured_route_enabled = False
+
+            if output_mode == "text":
+                ollama_output_mode = "schema_json"
+                ollama_response_schema = self._build_ollama_route_schema(tool_defs)
+                structured_route_enabled = True
+
+            sys_content = self._build_system_content(memory_context=memory_context, output_mode=ollama_output_mode)
+            response = await self._invoke_ollama_api_chat(
                 used_model=used_model,
                 messages=messages,
                 tool_defs=tool_defs,
                 max_tokens=max_tokens,
                 sys_content=sys_content,
-                response_schema=response_schema,
-                output_mode=output_mode,
+                response_schema=ollama_response_schema,
+                output_mode=ollama_output_mode,
             )
+            if structured_route_enabled:
+                return self._adapt_ollama_structured_route_result(response, tool_defs)
+            return response
 
+        sys_content = self._build_system_content(memory_context=memory_context, output_mode=output_mode)
         return await self._invoke_dashscope_chat_completions(
             used_model=used_model,
             messages=messages,

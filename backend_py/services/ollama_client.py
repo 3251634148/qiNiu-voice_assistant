@@ -286,6 +286,7 @@ class OllamaClient:
         options: Optional[Dict[str, Any]] = None,
         tools: Optional[Sequence[Dict[str, Any]]] = None,
         response_format: Optional[Any] = None,
+        think: Optional[bool] = None,
     ) -> OllamaChatResult:
         """调用 Ollama /api/chat。"""
 
@@ -315,6 +316,8 @@ class OllamaClient:
             payload["tools"] = [dict(t) for t in tools]
         if response_format is not None:
             payload["format"] = response_format
+        if think is not None:
+            payload["think"] = bool(think)
 
         url = f"{self.base_url}/api/chat"
         if bool(stream):
